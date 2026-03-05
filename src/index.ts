@@ -37,8 +37,11 @@ Commands:
 Options:
   --profile <name>  Use a named profile (~/.neoclaw-<name>)
   --dev             Use dev profile (~/.neoclaw-dev)
+  --mode <mode>     Onboard mode (for onboard command): default|web
   --host <host>     Bind host for web command (default: 127.0.0.1)
   --port <port>     Bind port for web command (default: 8788)
+  --token <token>   Web auth token (for web / onboard --mode web)
+  -y, --yes         Auto-confirm prompts (for onboard command)
   -h, --help        Show this help message
   -v, --version     Print version and exit`);
 }
@@ -60,6 +63,30 @@ function resolveBaseDir(argv: yargsParser.Arguments): string {
   return resolved
     ? join(homedir(), `.neoclaw-${resolved}`)
     : join(homedir(), ".neoclaw");
+}
+
+function resolveOnboardMode(argv: yargsParser.Arguments): "default" | "web" {
+  const raw = argv.mode;
+  if (raw === undefined) return "default";
+  if (typeof raw !== "string") {
+    console.error("Error: --mode requires a value (default|web)");
+    process.exit(1);
+  }
+
+  const mode = raw.trim().toLowerCase();
+  if (mode === "default" || mode === "file") return "default";
+  if (mode === "web") return "web";
+
+  console.error(`Error: invalid --mode "${raw}", expected default|web`);
+  process.exit(1);
+}
+
+function resolveWebOptions(argv: yargsParser.Arguments): { host: string; port: number; token?: string } {
+  return {
+    host: parseWebHost(argv.host),
+    port: parseWebPort(argv.port),
+    token: typeof argv.token === "string" ? argv.token : undefined,
+  };
 }
 
 const INTERRUPT_COMMANDS = new Set(["/stop"]);
@@ -133,13 +160,23 @@ async function main(): Promise<void> {
 
   if (subcommand === "onboard") {
     const flag = argv.profile ? ` --profile ${argv.profile}` : argv.dev ? " --dev" : "";
+    const mode = resolveOnboardMode(argv);
     const result = await handleOnboardCommand({
       baseDir,
       pkgRoot: __pkgRoot,
       profileFlag: flag,
       force: !!(argv.yes || argv.y),
+      mode,
     });
     console.log(result);
+
+    if (mode === "web") {
+      await handleWebCommand({
+        baseDir,
+        ...resolveWebOptions(argv),
+      });
+    }
+
     process.exit(0);
   }
 
@@ -155,12 +192,9 @@ async function main(): Promise<void> {
   }
 
   if (subcommand === "web") {
-    const config = loadConfig(baseDir);
-    ensureWorkspaceDirs(config.agent.workspace);
     await handleWebCommand({
       baseDir,
-      host: parseWebHost(argv.host),
-      port: parseWebPort(argv.port),
+      ...resolveWebOptions(argv),
     });
     process.exit(0);
   }

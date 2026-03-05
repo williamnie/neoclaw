@@ -28,6 +28,9 @@ npm install -g neoclaw
 # Initialize workspace and config
 neoclaw onboard
 
+# Or start from onboarding flow and open web panel directly
+neoclaw onboard --mode web
+
 # Edit config
 # ~/.neoclaw/config.json
 
@@ -51,8 +54,11 @@ Commands:
 Options:
   --profile <name>  Use a named profile (~/.neoclaw-<name>)
   --dev             Use dev profile (~/.neoclaw-dev)
+  --mode <mode>     Onboard mode (for onboard command): default|web
   --host <host>     Bind host for web command (default: 127.0.0.1)
   --port <port>     Bind port for web command (default: 8788)
+  --token <token>   Web auth token (for web / onboard --mode web)
+  -y, --yes         Auto-confirm prompts (for onboard command)
   -v, --version     Print version
   -h, --help        Show help
 ```
@@ -61,6 +67,9 @@ Open web config panel:
 
 ```bash
 neoclaw web --dev --host 127.0.0.1 --port 8788
+
+# or start from onboarding flow
+neoclaw onboard --mode web
 ```
 
 If running from source, build frontend first:
