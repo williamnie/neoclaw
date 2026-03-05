@@ -1,7 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { randomBytes, timingSafeEqual } from "crypto";
-import { mkdirSync, writeFileSync, readFileSync, statSync, createReadStream } from "fs";
-import { join, extname } from "path";
+import {
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  statSync,
+  createReadStream,
+  readdirSync,
+  rmSync,
+} from "fs";
+import { join, extname, resolve, dirname, basename, sep } from "path";
+import { fileURLToPath } from "url";
 import { createSession } from "@neovate/code";
 
 let _headlessSession: any = null;
@@ -17,6 +27,7 @@ async function getHeadlessBus(cwd: string) {
 }
 import { configPath, loadConfig, type Config } from "../config/schema.js";
 import { logger } from "../logger.js";
+import { readRuntimeStatusSnapshot } from "../runtime/status-store.js";
 
 type WebOptions = {
   baseDir: string;
@@ -30,6 +41,21 @@ type JsonBody = Record<string, unknown>;
 type RateState = { count: number; resetAt: number };
 
 const BODY_LIMIT = 1024 * 1024;
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = resolve(MODULE_DIR, "../..");
+const WEB_DIST_CANDIDATES = [
+  resolve(PROJECT_ROOT, "dist/web"),
+  resolve(PROJECT_ROOT, "webapp/dist"),
+  resolve(process.cwd(), "dist/web"),
+  resolve(process.cwd(), "webapp/dist"),
+];
+const SNAPSHOT_MAX_FILES = 30;
+
+export interface ConfigSnapshotMeta {
+  id: string;
+  createdAt: string;
+  size: number;
+}
 
 function createRateLimiter(limit: number, windowMs: number): (key: string) => boolean {
   const state = new Map<string, RateState>();
@@ -158,10 +184,145 @@ async function readJsonBody(req: IncomingMessage): Promise<JsonBody> {
   });
 }
 
+function resolveWebDistDir(): string | null {
+  for (const candidate of WEB_DIST_CANDIDATES) {
+    const index = join(candidate, "index.html");
+    if (existsSync(index)) return candidate;
+  }
+  return null;
+}
+
+function safeResolveInDist(distRoot: string, pathname: string): string | null {
+  const rel = pathname.replace(/^\/+/, "");
+  const target = resolve(distRoot, rel || "index.html");
+  if (target !== distRoot && !target.startsWith(distRoot + sep)) return null;
+  return target;
+}
+
+function snapshotDir(baseDir: string): string {
+  return join(baseDir, "snapshots", "config");
+}
+
+function normalizeSnapshotId(id: string): string {
+  const safe = basename(id).replace(/[^a-zA-Z0-9._-]/g, "_");
+  return safe.endsWith(".json") ? safe : `${safe}.json`;
+}
+
+function snapshotFilePath(baseDir: string, id: string): string {
+  return join(snapshotDir(baseDir), normalizeSnapshotId(id));
+}
+
+export function listConfigSnapshots(baseDir: string): ConfigSnapshotMeta[] {
+  const dir = snapshotDir(baseDir);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => {
+      const st = statSync(join(dir, name));
+      return {
+        id: name,
+        createdAt: st.mtime.toISOString(),
+        size: st.size,
+      };
+    })
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function pruneSnapshots(baseDir: string): void {
+  const list = listConfigSnapshots(baseDir);
+  if (list.length <= SNAPSHOT_MAX_FILES) return;
+  for (const snap of list.slice(SNAPSHOT_MAX_FILES)) {
+    try {
+      rmSync(snapshotFilePath(baseDir, snap.id), { force: true });
+    } catch {}
+  }
+}
+
+export function createConfigSnapshot(baseDir: string, config: Config, reason: string): ConfigSnapshotMeta {
+  const dir = snapshotDir(baseDir);
+  mkdirSync(dir, { recursive: true });
+  const now = new Date();
+  const stamp = now
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace("T", "-")
+    .replace("Z", "")
+    .replace(".", "");
+  const suffix = reason.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 24) || "manual";
+  const id = `${stamp}-${suffix}-${Math.floor(Math.random() * 1000)}.json`;
+  const file = snapshotFilePath(baseDir, id);
+  writeFileSync(file, JSON.stringify(config, null, 2), "utf-8");
+  const st = statSync(file);
+  pruneSnapshots(baseDir);
+  return {
+    id,
+    createdAt: st.mtime.toISOString(),
+    size: st.size,
+  };
+}
+
+export function readSnapshotConfig(baseDir: string, id: string): Config {
+  const file = snapshotFilePath(baseDir, id);
+  return JSON.parse(readFileSync(file, "utf-8")) as Config;
+}
+
+function mergeImportedConfig(current: Config, incoming: unknown): Config {
+  const body = (incoming && typeof incoming === "object" ? incoming : {}) as Record<string, unknown>;
+  const payload =
+    body.config && typeof body.config === "object" && !Array.isArray(body.config)
+      ? (body.config as Record<string, unknown>)
+      : body;
+
+  const channelsRaw =
+    payload.channels && typeof payload.channels === "object" && !Array.isArray(payload.channels)
+      ? (payload.channels as Record<string, unknown>)
+      : {};
+  const agentRaw =
+    payload.agent && typeof payload.agent === "object" && !Array.isArray(payload.agent)
+      ? (payload.agent as Record<string, unknown>)
+      : {};
+
+  const next = {
+    ...current,
+    ...(payload as Partial<Config>),
+    agent: {
+      ...current.agent,
+      ...(agentRaw as Partial<Config["agent"]>),
+    },
+    channels: {
+      ...current.channels,
+      ...(channelsRaw as Partial<Config["channels"]>),
+      telegram: {
+        ...current.channels.telegram,
+        ...((channelsRaw.telegram as Partial<Config["channels"]["telegram"]>) || {}),
+      },
+      cli: {
+        ...current.channels.cli,
+        ...((channelsRaw.cli as Partial<Config["channels"]["cli"]>) || {}),
+      },
+      dingtalk: {
+        ...current.channels.dingtalk,
+        ...((channelsRaw.dingtalk as Partial<Config["channels"]["dingtalk"]>) || {}),
+      },
+      feishu: {
+        ...current.channels.feishu,
+        ...((channelsRaw.feishu as Partial<Config["channels"]["feishu"]>) || {}),
+      },
+    },
+    providers:
+      payload.providers !== undefined
+        ? (payload.providers as Config["providers"])
+        : current.providers,
+  };
+
+  return next;
+}
+
 function maskConfig(config: Config): Config {
   const clone = structuredClone(config);
   if (clone.channels.telegram.token) clone.channels.telegram.token = "********";
   if (clone.channels.dingtalk.clientSecret) clone.channels.dingtalk.clientSecret = "********";
+  if (clone.channels.feishu.appSecret) clone.channels.feishu.appSecret = "********";
   return clone;
 }
 
@@ -187,6 +348,7 @@ function normalizeIncomingConfig(body: JsonBody, baseDir: string): Config {
   const telegram = (channels.telegram ?? {}) as JsonBody;
   const cli = (channels.cli ?? {}) as JsonBody;
   const dingtalk = (channels.dingtalk ?? {}) as JsonBody;
+  const feishu = (channels.feishu ?? {}) as JsonBody;
 
   if (typeof agent.model === "string") next.agent.model = agent.model.trim();
   if (typeof agent.codeModel === "string") next.agent.codeModel = agent.codeModel.trim();
@@ -215,6 +377,48 @@ function normalizeIncomingConfig(body: JsonBody, baseDir: string): Config {
   if (dingtalk.allowFrom !== undefined) next.channels.dingtalk.allowFrom = parseStringArray(dingtalk.allowFrom);
   if (typeof dingtalk.keepAlive === "boolean") next.channels.dingtalk.keepAlive = dingtalk.keepAlive;
 
+  if (typeof feishu.enabled === "boolean") next.channels.feishu.enabled = feishu.enabled;
+  if (typeof feishu.appId === "string") next.channels.feishu.appId = feishu.appId.trim();
+  if (typeof feishu.appSecret === "string" && feishu.appSecret.trim() && feishu.appSecret.trim() !== "********") {
+    next.channels.feishu.appSecret = feishu.appSecret.trim();
+  }
+  if (feishu.allowFrom !== undefined) next.channels.feishu.allowFrom = parseStringArray(feishu.allowFrom);
+  if (typeof feishu.domain === "string") next.channels.feishu.domain = feishu.domain.trim();
+  if (feishu.connectionMode === "websocket" || feishu.connectionMode === "webhook") {
+    next.channels.feishu.connectionMode = feishu.connectionMode;
+  }
+  if (typeof feishu.encryptKey === "string") next.channels.feishu.encryptKey = feishu.encryptKey.trim();
+  if (typeof feishu.verificationToken === "string") next.channels.feishu.verificationToken = feishu.verificationToken.trim();
+  if (typeof feishu.webhookHost === "string") next.channels.feishu.webhookHost = feishu.webhookHost.trim();
+  if (typeof feishu.webhookPort === "number") {
+    const n = Math.floor(feishu.webhookPort);
+    if (Number.isFinite(n) && n > 0) next.channels.feishu.webhookPort = n;
+  }
+  if (typeof feishu.webhookPath === "string") next.channels.feishu.webhookPath = feishu.webhookPath.trim();
+  if (typeof feishu.requireMention === "boolean") next.channels.feishu.requireMention = feishu.requireMention;
+  if (typeof feishu.webhookMaxBodyBytes === "number") {
+    const n = Math.floor(feishu.webhookMaxBodyBytes);
+    if (Number.isFinite(n) && n > 0) next.channels.feishu.webhookMaxBodyBytes = n;
+  }
+  if (typeof feishu.webhookBodyTimeoutMs === "number") {
+    const n = Math.floor(feishu.webhookBodyTimeoutMs);
+    if (Number.isFinite(n) && n > 0) next.channels.feishu.webhookBodyTimeoutMs = n;
+  }
+  if (typeof feishu.webhookRateLimitPerMin === "number") {
+    const n = Math.floor(feishu.webhookRateLimitPerMin);
+    if (Number.isFinite(n) && n > 0) next.channels.feishu.webhookRateLimitPerMin = n;
+  }
+  if (typeof feishu.wsReconnectBaseMs === "number") {
+    const n = Math.floor(feishu.wsReconnectBaseMs);
+    if (Number.isFinite(n) && n > 0) next.channels.feishu.wsReconnectBaseMs = n;
+  }
+  if (typeof feishu.wsReconnectMaxMs === "number") {
+    const n = Math.floor(feishu.wsReconnectMaxMs);
+    if (Number.isFinite(n) && n > 0) next.channels.feishu.wsReconnectMaxMs = n;
+  }
+  if (typeof feishu.dedupPersist === "boolean") next.channels.feishu.dedupPersist = feishu.dedupPersist;
+  if (typeof feishu.dedupFile === "string") next.channels.feishu.dedupFile = feishu.dedupFile.trim();
+
   if (body.providers !== undefined && typeof body.providers === "object" && body.providers && !Array.isArray(body.providers)) {
     next.providers = body.providers as Config["providers"];
   }
@@ -233,6 +437,15 @@ function validateConfig(config: Config): string[] {
     if (!config.channels.dingtalk.clientId) errs.push("DingTalk 启用时必须设置 clientId");
     if (!config.channels.dingtalk.clientSecret) errs.push("DingTalk 启用时必须设置 clientSecret");
     if (!config.channels.dingtalk.robotCode) errs.push("DingTalk 启用时必须设置 robotCode");
+  }
+  if (config.channels.feishu.enabled) {
+    if (!config.channels.feishu.appId) errs.push("Feishu 启用时必须设置 appId");
+    if (!config.channels.feishu.appSecret) errs.push("Feishu 启用时必须设置 appSecret");
+    const mode = config.channels.feishu.connectionMode || "websocket";
+    if (mode !== "websocket" && mode !== "webhook") errs.push("Feishu connectionMode 必须是 websocket 或 webhook");
+    if (mode === "webhook" && !config.channels.feishu.verificationToken) {
+      errs.push("Feishu 在 webhook 模式下必须设置 verificationToken");
+    }
   }
   return errs;
 }
@@ -313,23 +526,33 @@ export async function handleWebCommand(opts: WebOptions): Promise<void> {
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }
-        // Send the React app index.html
-        const indexHtmlPath = join(process.cwd(), "dist", "web", "index.html");
+        const distDir = resolveWebDistDir();
+        if (!distDir) {
+          sendHtml(res, "Web UI not built. Please run `bun run build:web`.");
+          return;
+        }
+        const indexHtmlPath = join(distDir, "index.html");
         try {
           const indexHtml = readFileSync(indexHtmlPath, "utf-8");
-          // Optionally replace a placeholder with csrf context, but modern way is to serve static and have an API endpoint grab context.
           sendHtml(res, indexHtml.replace('__CSRF_TOKEN__', csrfToken));
         } catch (err) {
-          sendHtml(res, "Web UI not built. Please run `npm run build` or use Vite dev server.");
+          sendHtml(res, "Web UI not built. Please run `bun run build:web`.");
         }
         return;
       }
 
       // Serve static assets for the React App
       if (!url.pathname.startsWith("/api/") && !url.pathname.startsWith("/auth/") && method === "GET") {
-        let safePath = url.pathname.replace(/^(\.\.[\/\\])+/, '');
-        if (safePath.startsWith('/')) safePath = safePath.slice(1);
-        const resolvedPath = join(process.cwd(), "dist", "web", safePath);
+        const distDir = resolveWebDistDir();
+        if (!distDir) {
+          sendJson(res, 503, { error: "Web UI not built. Run `bun run build:web` first." });
+          return;
+        }
+        const resolvedPath = safeResolveInDist(distDir, url.pathname);
+        if (!resolvedPath) {
+          sendJson(res, 404, { error: "Not found" });
+          return;
+        }
         serveStatic(res, resolvedPath);
         return;
       }
@@ -368,6 +591,62 @@ export async function handleWebCommand(opts: WebOptions): Promise<void> {
             sendJson(res, 403, { error: "Invalid CSRF token" });
             return;
           }
+        }
+
+        if (url.pathname === "/api/runtime-status" && method === "GET") {
+          sendJson(res, 200, readRuntimeStatusSnapshot(opts.baseDir));
+          return;
+        }
+
+        if (url.pathname === "/api/config/export" && method === "GET") {
+          sendJson(res, 200, loadConfig(opts.baseDir));
+          return;
+        }
+
+        if (url.pathname === "/api/config/snapshots" && method === "GET") {
+          sendJson(res, 200, { snapshots: listConfigSnapshots(opts.baseDir) });
+          return;
+        }
+
+        if (url.pathname === "/api/config/import" && method === "POST") {
+          const body = await readJsonBody(req);
+          const current = loadConfig(opts.baseDir);
+          const next = mergeImportedConfig(current, body);
+          const errors = validateConfig(next);
+          if (errors.length > 0) {
+            sendJson(res, 400, { error: "配置不合法", details: errors });
+            return;
+          }
+          const snapshot = createConfigSnapshot(opts.baseDir, current, "before-import");
+          writeFileSync(configPath(opts.baseDir), JSON.stringify(next, null, 2), "utf-8");
+          sendJson(res, 200, { ok: true, snapshot, config: maskConfig(loadConfig(opts.baseDir)) });
+          return;
+        }
+
+        if (url.pathname === "/api/config/rollback" && method === "POST") {
+          const body = await readJsonBody(req);
+          const id = typeof body.id === "string" ? body.id.trim() : "";
+          if (!id) {
+            sendJson(res, 400, { error: "snapshot id required" });
+            return;
+          }
+          const current = loadConfig(opts.baseDir);
+          let target: Config;
+          try {
+            target = readSnapshotConfig(opts.baseDir, id);
+          } catch {
+            sendJson(res, 404, { error: "snapshot not found" });
+            return;
+          }
+          const errors = validateConfig(target);
+          if (errors.length > 0) {
+            sendJson(res, 400, { error: "配置不合法", details: errors });
+            return;
+          }
+          const backup = createConfigSnapshot(opts.baseDir, current, "before-rollback");
+          writeFileSync(configPath(opts.baseDir), JSON.stringify(target, null, 2), "utf-8");
+          sendJson(res, 200, { ok: true, backup, config: maskConfig(loadConfig(opts.baseDir)) });
+          return;
         }
 
         if (url.pathname === "/api/providers/list" && method === "GET") {
@@ -543,4 +822,24 @@ export async function handleWebCommand(opts: WebOptions): Promise<void> {
     process.on("SIGINT", close);
     process.on("SIGTERM", close);
   });
+}
+
+export function parseWebHost(value: unknown): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  return raw || "127.0.0.1";
+}
+
+export function parseWebPort(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0 || n > 65535) return 8788;
+  return Math.floor(n);
+}
+
+export function hasConfigFile(baseDir: string): boolean {
+  try {
+    readFileSync(configPath(baseDir), "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
 }

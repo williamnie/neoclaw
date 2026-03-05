@@ -29,6 +29,7 @@ export default function App() {
       telegram: { enabled: false, token: '', allowFrom: '', proxy: '' },
       cli: { enabled: true },
       dingtalk: { enabled: false, clientId: '', clientSecret: '', robotCode: '', corpId: '', allowFrom: '', keepAlive: false },
+      feishu: { enabled: false, appId: '', appSecret: '', allowFrom: '', domain: 'feishu', connectionMode: 'websocket', verificationToken: '' },
     },
     providers: {},
     logLevel: 'info',
@@ -133,6 +134,12 @@ export default function App() {
           telegram: { ...config.channels?.telegram, allowFrom: config.channels?.telegram?.allowFrom?.join(',') || '' },
           cli: { ...config.channels?.cli },
           dingtalk: { ...config.channels?.dingtalk, allowFrom: config.channels?.dingtalk?.allowFrom?.join(',') || '' },
+          feishu: {
+            ...config.channels?.feishu,
+            allowFrom: config.channels?.feishu?.allowFrom?.join(',') || '',
+            domain: config.channels?.feishu?.domain || 'feishu',
+            connectionMode: config.channels?.feishu?.connectionMode || 'websocket',
+          },
         },
         providers: config.providers || {},
         logLevel: config.logLevel || 'info',
@@ -604,6 +611,48 @@ export default function App() {
                   <label className="form-label">{t('corpId')}</label>
                   <input type="text" className="form-input" value={configDraft.channels.dingtalk.corpId} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, dingtalk: { ...configDraft.channels.dingtalk, corpId: e.target.value } } })} />
                 </div>
+              </div>
+            )}
+
+            <label className="checkbox-label" style={{ marginBottom: '1rem' }}>
+              <input type="checkbox" checked={configDraft.channels.feishu.enabled} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, feishu: { ...configDraft.channels.feishu, enabled: e.target.checked } } })} />
+              {t('enableFeishu')}
+            </label>
+
+            {configDraft.channels.feishu.enabled && (
+              <div className="advanced-panel fade-in">
+                <div className="form-group">
+                  <label className="form-label">{t('feishuAppId')}</label>
+                  <input type="text" className="form-input" value={configDraft.channels.feishu.appId} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, feishu: { ...configDraft.channels.feishu, appId: e.target.value } } })} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{t('feishuAppSecret')}</label>
+                  <input type="password" className="form-input" value={configDraft.channels.feishu.appSecret} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, feishu: { ...configDraft.channels.feishu, appSecret: e.target.value } } })} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{t('allowedUserIds')}</label>
+                  <input type="text" placeholder={t('allowedUserIdsPlaceholder')} className="form-input" value={configDraft.channels.feishu.allowFrom} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, feishu: { ...configDraft.channels.feishu, allowFrom: e.target.value } } })} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{t('feishuDomain')}</label>
+                  <select className="form-select" value={configDraft.channels.feishu.domain} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, feishu: { ...configDraft.channels.feishu, domain: e.target.value } } })}>
+                    <option value="feishu">Feishu</option>
+                    <option value="lark">Lark</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{t('feishuConnectionMode')}</label>
+                  <select className="form-select" value={configDraft.channels.feishu.connectionMode} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, feishu: { ...configDraft.channels.feishu, connectionMode: e.target.value } } })}>
+                    <option value="websocket">{t('feishuModeWebsocket')}</option>
+                    <option value="webhook">{t('feishuModeWebhook')}</option>
+                  </select>
+                </div>
+                {configDraft.channels.feishu.connectionMode === 'webhook' && (
+                  <div className="form-group">
+                    <label className="form-label">{t('feishuVerificationToken')}</label>
+                    <input type="text" className="form-input" value={configDraft.channels.feishu.verificationToken || ''} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, feishu: { ...configDraft.channels.feishu, verificationToken: e.target.value } } })} />
+                  </div>
+                )}
               </div>
             )}
 
