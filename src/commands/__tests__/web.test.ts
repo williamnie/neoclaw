@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import type { Config } from "../../config/schema.js";
 import {
@@ -13,30 +13,31 @@ import {
 } from "../web.js";
 
 const tmpDirs: string[] = [];
-const cleanupFns: Array<() => void> = [];
 
 afterEach(() => {
-  while (cleanupFns.length > 0) cleanupFns.pop()?.();
   for (const dir of tmpDirs.splice(0, tmpDirs.length)) {
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   }
 });
 
-function backupPath(target: string): string | null {
-  if (!existsSync(target)) return null;
-  const backup = `${target}.bak-test-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  renameSync(target, backup);
-  cleanupFns.push(() => {
-    if (existsSync(target)) rmSync(target, { recursive: true, force: true });
-    renameSync(backup, target);
-  });
-  return backup;
+function createTempProjectRoot(suffix: string): string {
+  const root = join("/tmp", `neoclaw-web-${suffix}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  tmpDirs.push(root);
+  mkdirSync(join(root, "webapp"), { recursive: true });
+  writeFileSync(join(root, "webapp", "package.json"), JSON.stringify({ name: "webapp", private: true }), "utf-8");
+  return root;
 }
 
-function cleanupCreatedPath(target: string): void {
-  cleanupFns.push(() => {
-    if (existsSync(target)) rmSync(target, { recursive: true, force: true });
-  });
+function writeWebBuildDeps(projectRoot: string): void {
+  const files = [
+    join(projectRoot, "webapp", "node_modules", "vite", "package.json"),
+    join(projectRoot, "webapp", "node_modules", "typescript", "package.json"),
+    join(projectRoot, "webapp", "node_modules", "@vitejs", "plugin-react", "package.json"),
+  ];
+  for (const file of files) {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "{}", "utf-8");
+  }
 }
 
 describe("web command helpers", () => {
@@ -89,48 +90,74 @@ describe("web command helpers", () => {
   });
 
   it("reuses existing web dist without rebuilding", () => {
-    const repoRoot = process.cwd();
-    const webappDist = join(repoRoot, "webapp", "dist");
-    const indexPath = join(webappDist, "index.html");
-    const distWeb = join(repoRoot, "dist", "web");
-
-    backupPath(webappDist);
-    backupPath(distWeb);
+    const projectRoot = createTempProjectRoot("reuse");
+    const webappDist = join(projectRoot, "webapp", "dist");
     mkdirSync(webappDist, { recursive: true });
-    writeFileSync(indexPath, "<html>ok</html>", "utf-8");
-    cleanupCreatedPath(webappDist);
+    writeFileSync(join(webappDist, "index.html"), "<html>ok</html>", "utf-8");
 
     let calls = 0;
-    const resolved = ensureWebUiBuilt(() => {
-      calls += 1;
-      return { status: 0 };
+    const resolved = ensureWebUiBuilt({
+      projectRoot,
+      cwd: projectRoot,
+      runner: () => {
+        calls += 1;
+        return { status: 0 };
+      },
     });
 
     expect(calls).toBe(0);
     expect(resolved).toBe(webappDist);
   });
 
-  it("builds web dist automatically when missing", () => {
-    const repoRoot = process.cwd();
-    const webappDist = join(repoRoot, "webapp", "dist");
-    const distWeb = join(repoRoot, "dist", "web");
+  it("builds web dist automatically when missing and deps exist", () => {
+    const projectRoot = createTempProjectRoot("build-only");
+    const distWeb = join(projectRoot, "dist", "web");
     const builtIndex = join(distWeb, "index.html");
+    writeWebBuildDeps(projectRoot);
 
-    backupPath(webappDist);
-    backupPath(distWeb);
-    cleanupCreatedPath(webappDist);
-    cleanupCreatedPath(distWeb);
-
-    let calls = 0;
-    const resolved = ensureWebUiBuilt((_cmd, _args, cwd) => {
-      calls += 1;
-      expect(cwd).toBe(repoRoot);
-      mkdirSync(dirname(builtIndex), { recursive: true });
-      writeFileSync(builtIndex, "<html>built</html>", "utf-8");
-      return { status: 0 };
+    const calls: Array<{ cmd: string; args: string[]; cwd: string }> = [];
+    const resolved = ensureWebUiBuilt({
+      projectRoot,
+      cwd: projectRoot,
+      runner: (cmd, args, cwd) => {
+        calls.push({ cmd, args, cwd });
+        mkdirSync(dirname(builtIndex), { recursive: true });
+        writeFileSync(builtIndex, "<html>built</html>", "utf-8");
+        return { status: 0 };
+      },
     });
 
-    expect(calls).toBe(1);
+    expect(calls).toEqual([
+      { cmd: "bun", args: ["run", "build:web"], cwd: projectRoot },
+    ]);
+    expect(resolved).toBe(distWeb);
+  });
+
+  it("installs web deps before building when tooling is missing", () => {
+    const projectRoot = createTempProjectRoot("install-first");
+    const distWeb = join(projectRoot, "dist", "web");
+    const builtIndex = join(distWeb, "index.html");
+    const calls: Array<{ cmd: string; args: string[]; cwd: string }> = [];
+
+    const resolved = ensureWebUiBuilt({
+      projectRoot,
+      cwd: projectRoot,
+      runner: (cmd, args, cwd) => {
+        calls.push({ cmd, args, cwd });
+        if (args[0] === "install") {
+          writeWebBuildDeps(projectRoot);
+          return { status: 0 };
+        }
+        mkdirSync(dirname(builtIndex), { recursive: true });
+        writeFileSync(builtIndex, "<html>built</html>", "utf-8");
+        return { status: 0 };
+      },
+    });
+
+    expect(calls).toEqual([
+      { cmd: "bun", args: ["install"], cwd: join(projectRoot, "webapp") },
+      { cmd: "bun", args: ["run", "build:web"], cwd: projectRoot },
+    ]);
     expect(resolved).toBe(distWeb);
   });
 });
