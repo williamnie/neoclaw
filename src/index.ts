@@ -89,6 +89,14 @@ function resolveWebOptions(argv: yargsParser.Arguments): { host: string; port: n
   };
 }
 
+function resolveProfileArgs(argv: yargsParser.Arguments): string[] {
+  if (typeof argv.profile === "string" && argv.profile.trim()) {
+    return ["--profile", argv.profile.trim()];
+  }
+  if (argv.dev) return ["--dev"];
+  return [];
+}
+
 const INTERRUPT_COMMANDS = new Set(["/stop"]);
 
 async function processMsg(
@@ -162,6 +170,7 @@ async function main(): Promise<void> {
   if (subcommand === "onboard") {
     const flag = argv.profile ? ` --profile ${argv.profile}` : argv.dev ? " --dev" : "";
     const mode = resolveOnboardMode(argv);
+    const profileArgs = resolveProfileArgs(argv);
     const result = await handleOnboardCommand({
       baseDir,
       pkgRoot: __pkgRoot,
@@ -175,6 +184,10 @@ async function main(): Promise<void> {
       await handleWebCommand({
         baseDir,
         ...resolveWebOptions(argv),
+        autoStart: {
+          enabled: true,
+          startArgs: profileArgs,
+        },
       });
     }
 

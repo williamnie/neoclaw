@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { randomBytes, timingSafeEqual } from "crypto";
 import {
   existsSync,
@@ -35,6 +35,16 @@ type WebOptions = {
   host?: string;
   port?: number;
   token?: string;
+  autoStart?: WebAutoStartOptions;
+};
+
+type WebAutoStartOptions = {
+  enabled: boolean;
+  startArgs?: string[];
+  cwd?: string;
+  projectRoot?: string;
+  useBunRuntime?: boolean;
+  launcher?: DetachedProcessLauncher;
 };
 
 type JsonBody = Record<string, unknown>;
@@ -50,11 +60,31 @@ type RateState = { count: number; resetAt: number };
 type ModelOption = { label: string; value: string };
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type CustomApiFormat = "openai" | "responses" | "anthropic" | "google";
+type DetachedProcessLauncher = (cmd: string, args: string[], cwd: string) => Promise<{ pid?: number }> | { pid?: number };
+
+export type AutoStartCommand = {
+  mode: "bun" | "neoclaw";
+  cmd: string;
+  args: string[];
+  cwd: string;
+  display: string;
+};
+
+export type AutoStartResult = {
+  enabled: boolean;
+  started: boolean;
+  alreadyStarted?: boolean;
+  command?: string;
+  mode?: "bun" | "neoclaw";
+  pid?: number;
+  error?: string;
+};
 
 const BODY_LIMIT = 1024 * 1024;
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(MODULE_DIR, "../..");
 const SNAPSHOT_MAX_FILES = 30;
+const AUTO_STARTED_AGENTS = new Map<string, { pid?: number; command: string; mode: "bun" | "neoclaw" }>();
 
 export interface ConfigSnapshotMeta {
   id: string;
@@ -232,6 +262,106 @@ function defaultCommandRunner(cmd: string, args: string[], cwd: string): Command
     status: result.status,
     error: result.error,
   };
+}
+
+function quoteShellArg(arg: string): string {
+  return /[^A-Za-z0-9_./:-]/.test(arg) ? JSON.stringify(arg) : arg;
+}
+
+function defaultDetachedProcessLauncher(cmd: string, args: string[], cwd: string): Promise<{ pid?: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      cwd,
+      env: process.env,
+      stdio: "ignore",
+      detached: true,
+    });
+
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve({ pid: child.pid });
+    });
+  });
+}
+
+export function resolveAutoStartCommand(options: {
+  startArgs?: string[];
+  cwd?: string;
+  projectRoot?: string;
+  useBunRuntime?: boolean;
+} = {}): AutoStartCommand {
+  const startArgs = options.startArgs ?? [];
+  const useBunRuntime = options.useBunRuntime ?? typeof process.versions.bun === "string";
+
+  if (useBunRuntime) {
+    const args = startArgs.length > 0 ? ["run", "start", "--", ...startArgs] : ["run", "start"];
+    return {
+      mode: "bun",
+      cmd: "bun",
+      args,
+      cwd: options.projectRoot ?? PROJECT_ROOT,
+      display: ["bun", ...args].map(quoteShellArg).join(" "),
+    };
+  }
+
+  return {
+    mode: "neoclaw",
+    cmd: "neoclaw",
+    args: startArgs,
+    cwd: options.cwd ?? process.cwd(),
+    display: ["neoclaw", ...startArgs].map(quoteShellArg).join(" "),
+  };
+}
+
+export async function triggerAutoStart(
+  baseDir: string,
+  options: WebAutoStartOptions | undefined,
+) : Promise<AutoStartResult> {
+  if (!options?.enabled) return { enabled: false, started: false };
+
+  const existing = AUTO_STARTED_AGENTS.get(baseDir);
+  if (existing) {
+    return {
+      enabled: true,
+      started: false,
+      alreadyStarted: true,
+      command: existing.command,
+      mode: existing.mode,
+      pid: existing.pid,
+    };
+  }
+
+  const command = resolveAutoStartCommand({
+    startArgs: options.startArgs,
+    cwd: options.cwd,
+    projectRoot: options.projectRoot,
+    useBunRuntime: options.useBunRuntime,
+  });
+
+  try {
+    const launched = await (options.launcher ?? defaultDetachedProcessLauncher)(command.cmd, command.args, command.cwd);
+    AUTO_STARTED_AGENTS.set(baseDir, {
+      pid: launched.pid,
+      command: command.display,
+      mode: command.mode,
+    });
+    return {
+      enabled: true,
+      started: true,
+      command: command.display,
+      mode: command.mode,
+      pid: launched.pid,
+    };
+  } catch (error) {
+    return {
+      enabled: true,
+      started: false,
+      command: command.display,
+      mode: command.mode,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export function ensureWebUiBuilt(options: EnsureWebUiBuiltOptions = {}): string {
@@ -1026,9 +1156,15 @@ export async function handleWebCommand(opts: WebOptions): Promise<void> {
           }
 
           writeFileSync(configPath(opts.baseDir), JSON.stringify(incoming, null, 2), "utf-8");
+          const autoStart = await triggerAutoStart(opts.baseDir, opts.autoStart);
           sendJson(res, 200, {
             ok: true,
-            warning: "配置已写入。若正在运行 neoclaw 主进程，watcher 将自动热更新。",
+            warning: autoStart.enabled
+              ? autoStart.started || autoStart.alreadyStarted
+                ? "配置已写入，主进程已自动启动。"
+                : "配置已写入，但自动启动失败。若稍后手动启动，watcher 仍会自动热更新。"
+              : "配置已写入。若正在运行 neoclaw 主进程，watcher 将自动热更新。",
+            autoStart,
             config: maskConfig(loadConfig(opts.baseDir)),
           });
           return;

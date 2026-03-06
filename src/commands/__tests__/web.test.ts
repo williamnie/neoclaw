@@ -14,6 +14,8 @@ import {
   parseWebHost,
   parseWebPort,
   readSnapshotConfig,
+  resolveAutoStartCommand,
+  triggerAutoStart,
 } from "../web.js";
 
 const tmpDirs: string[] = [];
@@ -304,5 +306,78 @@ describe("web command helpers", () => {
       { cmd: "bun", args: ["run", "build:web"], cwd: projectRoot },
     ]);
     expect(resolved).toBe(distWeb);
+  });
+
+  it("resolves neoclaw auto-start command outside bun runtime", () => {
+    const command = resolveAutoStartCommand({
+      startArgs: ["--profile", "demo"],
+      cwd: "/tmp/neoclaw-shell",
+      useBunRuntime: false,
+    });
+
+    expect(command).toEqual({
+      mode: "neoclaw",
+      cmd: "neoclaw",
+      args: ["--profile", "demo"],
+      cwd: "/tmp/neoclaw-shell",
+      display: "neoclaw --profile demo",
+    });
+  });
+
+  it("resolves bun auto-start command in bun runtime", () => {
+    const command = resolveAutoStartCommand({
+      startArgs: ["--dev"],
+      projectRoot: "/tmp/neoclaw-project",
+      useBunRuntime: true,
+    });
+
+    expect(command).toEqual({
+      mode: "bun",
+      cmd: "bun",
+      args: ["run", "start", "--", "--dev"],
+      cwd: "/tmp/neoclaw-project",
+      display: "bun run start -- --dev",
+    });
+  });
+
+  it("starts only once per baseDir when auto-start is enabled", async () => {
+    const launches: Array<{ cmd: string; args: string[]; cwd: string }> = [];
+    const launcher = (cmd: string, args: string[], cwd: string) => {
+      launches.push({ cmd, args, cwd });
+      return { pid: 4321 };
+    };
+    const baseDir = join("/tmp", `neoclaw-auto-start-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+    const first = await triggerAutoStart(baseDir, {
+      enabled: true,
+      startArgs: ["--profile", "demo"],
+      cwd: "/tmp/neoclaw-shell",
+      useBunRuntime: false,
+      launcher,
+    });
+    const second = await triggerAutoStart(baseDir, {
+      enabled: true,
+      startArgs: ["--profile", "demo"],
+      cwd: "/tmp/neoclaw-shell",
+      useBunRuntime: false,
+      launcher,
+    });
+
+    expect(launches).toEqual([
+      { cmd: "neoclaw", args: ["--profile", "demo"], cwd: "/tmp/neoclaw-shell" },
+    ]);
+    expect(first).toMatchObject({
+      enabled: true,
+      started: true,
+      command: "neoclaw --profile demo",
+      pid: 4321,
+    });
+    expect(second).toMatchObject({
+      enabled: true,
+      started: false,
+      alreadyStarted: true,
+      command: "neoclaw --profile demo",
+      pid: 4321,
+    });
   });
 });
