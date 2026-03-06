@@ -40,18 +40,17 @@ type WebOptions = {
 type JsonBody = Record<string, unknown>;
 type CommandRunnerResult = { status: number | null; error?: Error };
 type CommandRunner = (cmd: string, args: string[], cwd: string) => CommandRunnerResult;
+type EnsureWebUiBuiltOptions = {
+  runner?: CommandRunner;
+  projectRoot?: string;
+  cwd?: string;
+};
 
 type RateState = { count: number; resetAt: number };
 
 const BODY_LIMIT = 1024 * 1024;
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(MODULE_DIR, "../..");
-const WEB_DIST_CANDIDATES = [
-  resolve(PROJECT_ROOT, "dist/web"),
-  resolve(PROJECT_ROOT, "webapp/dist"),
-  resolve(process.cwd(), "dist/web"),
-  resolve(process.cwd(), "webapp/dist"),
-];
 const SNAPSHOT_MAX_FILES = 30;
 
 export interface ConfigSnapshotMeta {
@@ -187,12 +186,37 @@ async function readJsonBody(req: IncomingMessage): Promise<JsonBody> {
   });
 }
 
-function resolveWebDistDir(): string | null {
-  for (const candidate of WEB_DIST_CANDIDATES) {
+function resolveWebDistDir(projectRoot = PROJECT_ROOT, cwd = process.cwd()): string | null {
+  const candidates = [
+    resolve(projectRoot, "dist/web"),
+    resolve(projectRoot, "webapp/dist"),
+    resolve(cwd, "dist/web"),
+    resolve(cwd, "webapp/dist"),
+  ];
+  for (const candidate of candidates) {
     const index = join(candidate, "index.html");
     if (existsSync(index)) return candidate;
   }
   return null;
+}
+
+function hasWebBuildDependencies(projectRoot = PROJECT_ROOT): boolean {
+  const webappRoot = resolve(projectRoot, "webapp");
+  return [
+    join(webappRoot, "node_modules", "vite", "package.json"),
+    join(webappRoot, "node_modules", "typescript", "package.json"),
+    join(webappRoot, "node_modules", "@vitejs", "plugin-react", "package.json"),
+  ].every((path) => existsSync(path));
+}
+
+function assertCommandSucceeded(command: string, result: CommandRunnerResult): void {
+  if (result.error) {
+    throw new Error(`Failed to run ${command}: ${result.error.message}`);
+  }
+
+  if (result.status !== 0) {
+    throw new Error(`Failed to run ${command}: exited with code ${result.status ?? "unknown"}`);
+  }
 }
 
 function defaultCommandRunner(cmd: string, args: string[], cwd: string): CommandRunnerResult {
@@ -207,22 +231,32 @@ function defaultCommandRunner(cmd: string, args: string[], cwd: string): Command
   };
 }
 
-export function ensureWebUiBuilt(runner: CommandRunner = defaultCommandRunner): string {
-  const distDir = resolveWebDistDir();
+export function ensureWebUiBuilt(options: EnsureWebUiBuiltOptions = {}): string {
+  const {
+    runner = defaultCommandRunner,
+    projectRoot = PROJECT_ROOT,
+    cwd = process.cwd(),
+  } = options;
+
+  const distDir = resolveWebDistDir(projectRoot, cwd);
   if (distDir) return distDir;
 
+  const webappRoot = resolve(projectRoot, "webapp");
+  if (!existsSync(join(webappRoot, "package.json"))) {
+    throw new Error(`Failed to build Web UI: webapp package not found at ${webappRoot}`);
+  }
+
+  if (!hasWebBuildDependencies(projectRoot)) {
+    logger.info("web", "web build dependencies not found, running `bun install` in webapp");
+    const installResult = runner("bun", ["install"], webappRoot);
+    assertCommandSucceeded("`bun install` in webapp", installResult);
+  }
+
   logger.info("web", "web ui not found, running `bun run build:web`");
-  const result = runner("bun", ["run", "build:web"], PROJECT_ROOT);
+  const result = runner("bun", ["run", "build:web"], projectRoot);
+  assertCommandSucceeded("`bun run build:web`", result);
 
-  if (result.error) {
-    throw new Error(`Failed to build Web UI: ${result.error.message}`);
-  }
-
-  if (result.status !== 0) {
-    throw new Error(`Failed to build Web UI: \`bun run build:web\` exited with code ${result.status ?? "unknown"}`);
-  }
-
-  const builtDistDir = resolveWebDistDir();
+  const builtDistDir = resolveWebDistDir(projectRoot, cwd);
   if (!builtDistDir) {
     throw new Error("Failed to build Web UI: build completed but index.html is still missing");
   }
