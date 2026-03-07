@@ -1,6 +1,20 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api, type ModelOption, type ProviderMeta } from './api';
+import {
+  buildExportFilename,
+  collectChangedPaths,
+  downloadJsonFile,
+  formatBytes,
+  formatSnapshotReason,
+  formatTimestamp,
+  mergeImportedConfigPreview,
+  readJsonFile,
+  sanitizePreviewConfig,
+  summarizeChangedPaths,
+  toFormConfig,
+  type ConfigSnapshotMeta,
+} from './config-management';
 
 type CustomApiFormat = 'openai' | 'responses' | 'anthropic' | 'google';
 
@@ -22,6 +36,38 @@ type RuntimeStatusResponse = {
   };
 };
 
+type CurrentConfigResponse = {
+  config: any;
+};
+
+type SnapshotListResponse = {
+  snapshots: ConfigSnapshotMeta[];
+};
+
+type SnapshotPreviewResponse = {
+  snapshot: ConfigSnapshotMeta;
+  config: any;
+};
+
+type ConfigMutationResponse = {
+  ok: boolean;
+  config: any;
+  snapshot?: ConfigSnapshotMeta;
+  backup?: ConfigSnapshotMeta;
+};
+
+type PreviewState = {
+  mode: 'import' | 'rollback';
+  title: string;
+  subtitle: string;
+  config: any;
+  changedPaths: string[];
+  topSections: string[];
+  filename?: string;
+  snapshot?: ConfigSnapshotMeta;
+  payload?: any;
+};
+
 const CUSTOM_API_FORMATS: CustomApiFormat[] = ['openai', 'responses', 'anthropic', 'google'];
 
 export default function App() {
@@ -35,7 +81,9 @@ export default function App() {
   const [tokenInput, setTokenInput] = useState('');
 
   const [step, setStep] = useState(1);
+  const [viewMode, setViewMode] = useState<'wizard' | 'config'>('wizard');
   const [providers, setProviders] = useState<ProviderMeta[]>([]);
+  const [currentConfigRaw, setCurrentConfigRaw] = useState<any>(null);
 
   const [configDraft, setConfigDraft] = useState<any>({
     agent: {
@@ -77,6 +125,14 @@ export default function App() {
   const [startCommand, setStartCommand] = useState('neoclaw');
   const [isStartingAgent, setIsStartingAgent] = useState(false);
   const [agentRunning, setAgentRunning] = useState(false);
+  const [snapshots, setSnapshots] = useState<ConfigSnapshotMeta[]>([]);
+  const [snapshotsLoading, setSnapshotsLoading] = useState(false);
+  const [managementError, setManagementError] = useState('');
+  const [managementSuccess, setManagementSuccess] = useState('');
+  const [previewState, setPreviewState] = useState<PreviewState | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [confirmingPreview, setConfirmingPreview] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
@@ -165,29 +221,36 @@ export default function App() {
     setAgentRunning(!!runtime.agent?.running);
   };
 
+  const resolveStepFromConfig = (config: any): number => {
+    const model = typeof config?.agent?.model === 'string' ? config.agent.model.trim() : '';
+    const workspace = typeof config?.agent?.workspace === 'string' ? config.agent.workspace.trim() : '';
+    if (!model) return 1;
+    if (!workspace) return 2;
+    return 3;
+  };
+
+  const applyServerConfig = (config: any) => {
+    setCurrentConfigRaw(config);
+    setConfigDraft(toFormConfig(config));
+  };
+
+  const loadSnapshots = async () => {
+    try {
+      setSnapshotsLoading(true);
+      const res = await api<SnapshotListResponse>('/api/config/snapshots');
+      setSnapshots(res.snapshots || []);
+    } catch (err: any) {
+      setManagementError(err.message || t('configManagementLoadFailed'));
+    } finally {
+      setSnapshotsLoading(false);
+    }
+  };
+
   const checkContext = async () => {
     try {
-      const { config } = await api('/api/config/current');
-      await refreshRuntimeStatus();
-
-      setConfigDraft((prev: any) => ({
-        ...prev,
-        agent: { ...prev.agent, ...config.agent },
-        channels: {
-          telegram: { ...config.channels?.telegram, allowFrom: config.channels?.telegram?.allowFrom?.join(',') || '' },
-          cli: { ...config.channels?.cli },
-          dingtalk: { ...config.channels?.dingtalk, allowFrom: config.channels?.dingtalk?.allowFrom?.join(',') || '' },
-          feishu: {
-            ...config.channels?.feishu,
-            allowFrom: config.channels?.feishu?.allowFrom?.join(',') || '',
-            domain: config.channels?.feishu?.domain || 'feishu',
-            connectionMode: config.channels?.feishu?.connectionMode || 'websocket',
-          },
-        },
-        providers: config.providers || {},
-        logLevel: config.logLevel || 'info',
-      }));
-
+      const { config } = await api<CurrentConfigResponse>('/api/config/current');
+      applyServerConfig(config);
+      await Promise.all([refreshRuntimeStatus(), loadSnapshots()]);
       const res = await api('/api/providers/list');
       setProviders(res.providers || []);
       setLoading(false);
@@ -351,6 +414,9 @@ export default function App() {
       const res = await api<SaveConfigResult>('/api/config/save', configDraft);
       setAutoStartState(null);
       setStartCommand(res.startCommand || 'neoclaw');
+      if ((res as any).config) {
+        applyServerConfig((res as any).config);
+      }
       await refreshRuntimeStatus();
       setStep(4);
     } catch (err: any) {
@@ -361,6 +427,115 @@ export default function App() {
       setError(msg);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const exportConfig = async () => {
+    try {
+      setManagementError('');
+      setManagementSuccess('');
+      const config = await api('/api/config/export');
+      downloadJsonFile(config, buildExportFilename());
+      setManagementSuccess(t('configExportSuccess'));
+    } catch (err: any) {
+      setManagementError(err.message || t('configExportFailed'));
+    }
+  };
+
+  const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !currentConfigRaw) return;
+
+    try {
+      setManagementError('');
+      setManagementSuccess('');
+      const payload = await readJsonFile(file);
+      const merged = mergeImportedConfigPreview(currentConfigRaw, payload);
+      const previewConfig = sanitizePreviewConfig(merged);
+      const summary = summarizeChangedPaths(collectChangedPaths(currentConfigRaw, previewConfig));
+      setPreviewState({
+        mode: 'import',
+        title: t('configImportPreviewTitle'),
+        subtitle: t('configImportPreviewSubtitle'),
+        filename: file.name,
+        payload,
+        config: previewConfig,
+        changedPaths: summary.paths,
+        topSections: summary.topSections,
+      });
+    } catch (err: any) {
+      setManagementError(`${t('configImportInvalidFile')}: ${err.message}`);
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  const previewSnapshot = async (snapshot: ConfigSnapshotMeta) => {
+    try {
+      setPreviewLoading(true);
+      setManagementError('');
+      setManagementSuccess('');
+      const res = await api<SnapshotPreviewResponse>(`/api/config/snapshots/${encodeURIComponent(snapshot.id)}`);
+      const previewConfig = sanitizePreviewConfig(res.config);
+      const summary = summarizeChangedPaths(collectChangedPaths(currentConfigRaw || {}, previewConfig));
+      setPreviewState({
+        mode: 'rollback',
+        title: t('configRollbackPreviewTitle'),
+        subtitle: t('configRollbackPreviewSubtitle'),
+        snapshot: res.snapshot,
+        config: previewConfig,
+        changedPaths: summary.paths,
+        topSections: summary.topSections,
+      });
+    } catch (err: any) {
+      setManagementError(err.message || t('configSnapshotPreviewFailed'));
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const closePreview = () => {
+    setPreviewState(null);
+    setConfirmingPreview(false);
+  };
+
+  const confirmPreviewAction = async () => {
+    if (!previewState) return;
+
+    try {
+      setConfirmingPreview(true);
+      setManagementError('');
+      setManagementSuccess('');
+
+      if (previewState.mode === 'import') {
+        const res = await api<ConfigMutationResponse>('/api/config/import', previewState.payload);
+        applyServerConfig(res.config);
+        setStep(resolveStepFromConfig(res.config));
+        setViewMode('wizard');
+        await loadSnapshots();
+        setManagementSuccess(
+          res.snapshot
+            ? `${t('configImportSuccess')} ${t('configImportSnapshotHint')} ${formatTimestamp(res.snapshot.createdAt, locale)}`
+            : t('configImportSuccess'),
+        );
+      } else {
+        const res = await api<ConfigMutationResponse>('/api/config/rollback', { id: previewState.snapshot?.id });
+        applyServerConfig(res.config);
+        setStep(resolveStepFromConfig(res.config));
+        setViewMode('wizard');
+        await loadSnapshots();
+        setManagementSuccess(
+          res.backup
+            ? `${t('configRollbackSuccess')} ${t('configRollbackSnapshotHint')} ${formatTimestamp(res.backup.createdAt, locale)}`
+            : t('configRollbackSuccess'),
+        );
+      }
+
+      closePreview();
+    } catch (err: any) {
+      setManagementError(err.message || t('configMutationFailed'));
+    } finally {
+      setConfirmingPreview(false);
     }
   };
 
@@ -387,6 +562,107 @@ export default function App() {
         : t('autoStartSuccessHint')
       : t('autoStartFailedHint')
     : agentRunning ? t('autoStartAlreadyHint') : t('clickStartHint');
+
+  const previewSectionLabel = previewState?.topSections.length
+    ? previewState.topSections.join(', ')
+    : t('configPreviewNoChanges');
+
+  const previewPathList = previewState?.changedPaths.slice(0, 12) || [];
+
+  const configManagementPanel = (
+    <section className="config-management-shell">
+      <div className="config-management-card">
+        <div className="config-management-header">
+          <div>
+            <h2 className="config-management-title">{t('configManagementTitle')}</h2>
+            <p className="config-management-subtitle">{t('configManagementSubtitle')}</p>
+          </div>
+        </div>
+
+        <div className="config-management-meta">
+          <span>{t('configSavedStatus')}</span>
+          <strong>{currentConfigRaw?.agent?.model || t('configNotConfigured')}</strong>
+          <span>·</span>
+          <span>{currentConfigRaw?.agent?.workspace || t('configWorkspaceMissing')}</span>
+          <span>·</span>
+          <span>{t('configSnapshotCount', { count: snapshots.length })}</span>
+        </div>
+
+        {managementError && <div className="error-text config-feedback config-feedback-error">{managementError}</div>}
+        {managementSuccess && <div className="success-text config-feedback config-feedback-success">{managementSuccess}</div>}
+
+        <details className="config-section" open>
+          <summary className="config-section-summary">
+            <div>
+              <strong>{t('configActionsTitle')}</strong>
+              <span>{t('configActionsSubtitle')}</span>
+            </div>
+          </summary>
+          <div className="config-section-body">
+            <div className="config-management-actions">
+              <button type="button" className="btn btn-outline" onClick={exportConfig}>
+                {t('configExportButton')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {t('configImportButton')}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json,.json"
+                style={{ display: 'none' }}
+                onChange={handleImportFile}
+              />
+            </div>
+          </div>
+        </details>
+
+        <details className="config-section" open>
+          <summary className="config-section-summary">
+            <div>
+              <strong>{t('configHistoryTitle')}</strong>
+              <span>{t('configHistorySubtitle')}</span>
+            </div>
+            <button type="button" className="btn btn-outline" onClick={(event) => { event.preventDefault(); loadSnapshots(); }} disabled={snapshotsLoading}>
+              {snapshotsLoading ? t('configSnapshotsRefreshing') : t('configSnapshotsRefresh')}
+            </button>
+          </summary>
+          <div className="config-section-body">
+            {snapshots.length === 0 ? (
+              <div className="config-snapshot-empty">
+                {snapshotsLoading ? t('configSnapshotsLoading') : t('configSnapshotsEmpty')}
+              </div>
+            ) : (
+              <div className="config-snapshot-list">
+                {snapshots.map((snapshot) => (
+                  <button
+                    key={snapshot.id}
+                    type="button"
+                    className="config-snapshot-item"
+                    onClick={() => previewSnapshot(snapshot)}
+                    disabled={previewLoading || confirmingPreview}
+                  >
+                    <div className="config-snapshot-main">
+                      <strong>{formatSnapshotReason(snapshot.reason, locale)}</strong>
+                      <span>{formatTimestamp(snapshot.createdAt, locale)}</span>
+                    </div>
+                    <div className="config-snapshot-side">
+                      <span>{formatBytes(snapshot.size)}</span>
+                      <span>{t('configPreviewRollbackAction')}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </details>
+      </div>
+    </section>
+  );
 
   if (loading && !needsLogin && step === 1 && providers.length === 0) {
     return (
@@ -433,11 +709,28 @@ export default function App() {
   return (
     <div className="fade-in">
       {renderLanguageSwitch()}
-      <div className="glass-card">
+      <div className="glass-card onboarding-shell">
         <h1 className="title">{t('initTitle')}</h1>
         <p className="subtitle">{t('initSubtitle')}</p>
 
-        {step < 4 && (
+        <div className="view-toggle" role="tablist" aria-label={t('viewToggleLabel')}>
+          <button
+            type="button"
+            className={`view-toggle-btn ${viewMode === 'wizard' ? 'active' : ''}`}
+            onClick={() => setViewMode('wizard')}
+          >
+            {t('viewWizard')}
+          </button>
+          <button
+            type="button"
+            className={`view-toggle-btn ${viewMode === 'config' ? 'active' : ''}`}
+            onClick={() => setViewMode('config')}
+          >
+            {t('viewConfig')}
+          </button>
+        </div>
+
+        {viewMode === 'wizard' && step < 4 && (
           <div className="step-indicator">
             <div className={`step ${step >= 1 ? 'completed' : ''}`}>1</div>
             <div className={`step ${step >= 2 ? (step === 2 ? 'active' : 'completed') : ''}`}>2</div>
@@ -445,9 +738,9 @@ export default function App() {
           </div>
         )}
 
-        {error && <div className="form-group"><div className="error-text" style={{ background: '#fee2e2', padding: '1rem', borderRadius: 8 }}>{error}</div></div>}
+        {viewMode === 'wizard' && error && <div className="form-group"><div className="error-text" style={{ background: '#fee2e2', padding: '1rem', borderRadius: 8 }}>{error}</div></div>}
 
-        {step === 1 && (
+        {viewMode === 'wizard' && step === 1 && (
           <div className="fade-in">
             <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>{t('step1Title')}</h2>
 
@@ -592,7 +885,7 @@ export default function App() {
           </div>
         )}
 
-        {step === 2 && (
+        {viewMode === 'wizard' && step === 2 && (
           <div className="fade-in">
             <h2 style={{ marginBottom: '1.5rem', fontSize: '1.25rem' }}>{t('step2Title')}</h2>
 
@@ -657,7 +950,7 @@ export default function App() {
           </div>
         )}
 
-        {step === 3 && (
+        {viewMode === 'wizard' && step === 3 && (
           <div className="fade-in">
             <h2 style={{ marginBottom: '1.5rem', fontSize: '1.25rem' }}>{t('step3Title')}</h2>
 
@@ -763,7 +1056,7 @@ export default function App() {
           </div>
         )}
 
-        {step === 4 && (
+        {viewMode === 'wizard' && step === 4 && (
           <div className="fade-in" style={{ padding: '2rem 0' }}>
             <div style={{ textAlign: 'center' }}>
               <div style={{ fontSize: '4rem', marginBottom: '1rem' }}>🎉</div>
@@ -838,7 +1131,91 @@ export default function App() {
             </div>
           </div>
         )}
+        {viewMode === 'config' && configManagementPanel}
       </div>
+
+      {previewState && (
+        <div className="modal-backdrop" onClick={closePreview}>
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>{previewState.title}</h3>
+                <p>{previewState.subtitle}</p>
+              </div>
+              <button type="button" className="btn btn-outline" onClick={closePreview}>
+                {t('configPreviewClose')}
+              </button>
+            </div>
+
+            <div className="modal-meta-grid">
+              {previewState.filename && (
+                <div className="modal-meta-item">
+                  <span>{t('configPreviewFile')}</span>
+                  <strong>{previewState.filename}</strong>
+                </div>
+              )}
+              {previewState.snapshot && (
+                <>
+                  <div className="modal-meta-item">
+                    <span>{t('configPreviewSnapshot')}</span>
+                    <strong>{formatSnapshotReason(previewState.snapshot.reason, locale)}</strong>
+                  </div>
+                  <div className="modal-meta-item">
+                    <span>{t('configPreviewCreatedAt')}</span>
+                    <strong>{formatTimestamp(previewState.snapshot.createdAt, locale)}</strong>
+                  </div>
+                </>
+              )}
+              <div className="modal-meta-item">
+                <span>{t('configPreviewChangedSections')}</span>
+                <strong>{previewSectionLabel}</strong>
+              </div>
+              <div className="modal-meta-item">
+                <span>{t('configPreviewChangedCount')}</span>
+                <strong>{previewState.changedPaths.length}</strong>
+              </div>
+            </div>
+
+            <div className="modal-content-grid">
+              <div className="modal-panel">
+                <h4>{t('configPreviewChangedPaths')}</h4>
+                {previewPathList.length === 0 ? (
+                  <div className="config-snapshot-empty">{t('configPreviewNoChanges')}</div>
+                ) : (
+                  <div className="config-path-list">
+                    {previewPathList.map((path) => (
+                      <code key={path} className="config-path-chip">{path}</code>
+                    ))}
+                    {previewState.changedPaths.length > previewPathList.length && (
+                      <span className="config-more-paths">
+                        {t('configPreviewMorePaths', { count: previewState.changedPaths.length - previewPathList.length })}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="modal-panel">
+                <h4>{t('configPreviewConfig')}</h4>
+                <pre className="config-preview-json">{JSON.stringify(previewState.config, null, 2)}</pre>
+              </div>
+            </div>
+
+            <div className="actions" style={{ marginTop: '1.5rem' }}>
+              <button type="button" className="btn btn-outline" onClick={closePreview}>
+                {t('configPreviewCancel')}
+              </button>
+              <button type="button" className="btn btn-primary" onClick={confirmPreviewAction} disabled={confirmingPreview}>
+                {confirmingPreview
+                  ? t('configPreviewApplying')
+                  : previewState.mode === 'import'
+                    ? t('configPreviewConfirmImport')
+                    : t('configPreviewConfirmRollback')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

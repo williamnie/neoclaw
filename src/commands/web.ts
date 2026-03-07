@@ -98,6 +98,12 @@ export interface ConfigSnapshotMeta {
   id: string;
   createdAt: string;
   size: number;
+  reason: string;
+}
+
+export interface ConfigSnapshotPreview {
+  snapshot: ConfigSnapshotMeta;
+  config: Config;
 }
 
 function createRateLimiter(limit: number, windowMs: number): (key: string) => boolean {
@@ -411,6 +417,12 @@ function snapshotFilePath(baseDir: string, id: string): string {
   return join(snapshotDir(baseDir), normalizeSnapshotId(id));
 }
 
+function parseSnapshotReason(id: string): string {
+  const base = basename(id, ".json");
+  const match = base.match(/^\d{8}-\d+-(.+)-\d+$/);
+  return match?.[1]?.trim() || "manual";
+}
+
 export function listConfigSnapshots(baseDir: string): ConfigSnapshotMeta[] {
   const dir = snapshotDir(baseDir);
   if (!existsSync(dir)) return [];
@@ -422,6 +434,7 @@ export function listConfigSnapshots(baseDir: string): ConfigSnapshotMeta[] {
         id: name,
         createdAt: st.mtime.toISOString(),
         size: st.size,
+        reason: parseSnapshotReason(name),
       };
     })
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -457,12 +470,25 @@ export function createConfigSnapshot(baseDir: string, config: Config, reason: st
     id,
     createdAt: st.mtime.toISOString(),
     size: st.size,
+    reason,
   };
 }
 
 export function readSnapshotConfig(baseDir: string, id: string): Config {
   const file = snapshotFilePath(baseDir, id);
   return JSON.parse(readFileSync(file, "utf-8")) as Config;
+}
+
+export function readConfigSnapshotPreview(baseDir: string, id: string): ConfigSnapshotPreview {
+  const normalizedId = normalizeSnapshotId(id);
+  const snapshot = listConfigSnapshots(baseDir).find((entry) => entry.id === normalizedId);
+  if (!snapshot) {
+    throw new Error("snapshot not found");
+  }
+  return {
+    snapshot,
+    config: maskConfig(readSnapshotConfig(baseDir, normalizedId)),
+  };
 }
 
 function mergeImportedConfig(current: Config, incoming: unknown): Config {
@@ -973,6 +999,20 @@ export async function handleWebCommand(opts: WebOptions): Promise<WebCommandResu
 
         if (url.pathname === "/api/config/snapshots" && method === "GET") {
           sendJson(res, 200, { snapshots: listConfigSnapshots(opts.baseDir) });
+          return;
+        }
+
+        if (url.pathname.startsWith("/api/config/snapshots/") && method === "GET") {
+          const snapshotId = decodeURIComponent(url.pathname.slice("/api/config/snapshots/".length));
+          if (!snapshotId) {
+            sendJson(res, 400, { error: "snapshot id required" });
+            return;
+          }
+          try {
+            sendJson(res, 200, readConfigSnapshotPreview(opts.baseDir, snapshotId));
+          } catch {
+            sendJson(res, 404, { error: "snapshot not found" });
+          }
           return;
         }
 

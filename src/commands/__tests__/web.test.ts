@@ -13,6 +13,7 @@ import {
   listConfigSnapshots,
   parseWebHost,
   parseWebPort,
+  readConfigSnapshotPreview,
   readSnapshotConfig,
   resolveAutoStartCommand,
   triggerAutoStart,
@@ -89,10 +90,47 @@ describe("web command helpers", () => {
 
     const s1 = createConfigSnapshot(baseDir, cfg, "before-import");
     expect(s1.id).toContain("before-import");
+    expect(s1.reason).toBe("before-import");
     const all = listConfigSnapshots(baseDir);
     expect(all.length).toBeGreaterThan(0);
+    expect(all[0]?.reason).toBe("before-import");
     const read = readSnapshotConfig(baseDir, s1.id);
     expect(read.channels.feishu.appId).toBe("cli_1");
+  });
+
+  it("returns masked snapshot preview metadata", () => {
+    const baseDir = join("/tmp", `neoclaw-web-snapshot-preview-${Date.now()}`);
+    tmpDirs.push(baseDir);
+    mkdirSync(baseDir, { recursive: true });
+
+    const cfg = {
+      agent: { model: "openai/gpt-5", memoryWindow: 50, workspace: join(baseDir, "workspace") },
+      channels: {
+        telegram: { enabled: true, token: "tg-secret", allowFrom: [] },
+        cli: { enabled: true },
+        dingtalk: { enabled: true, clientId: "ding-id", clientSecret: "ding-secret", robotCode: "robot", allowFrom: [] },
+        feishu: { enabled: true, appId: "cli_1", appSecret: "feishu-secret", allowFrom: [], connectionMode: "websocket" },
+      },
+      logLevel: "info",
+    } as Config;
+
+    const snapshot = createConfigSnapshot(baseDir, cfg, "before-rollback");
+    const preview = readConfigSnapshotPreview(baseDir, snapshot.id);
+
+    expect(preview.snapshot.id).toBe(snapshot.id);
+    expect(preview.snapshot.reason).toBe("before-rollback");
+    expect(preview.config.channels.telegram.token).toBe("********");
+    expect(preview.config.channels.dingtalk.clientSecret).toBe("********");
+    expect(preview.config.channels.feishu.appSecret).toBe("********");
+    expect(preview.config.channels.telegram.token).not.toBe("tg-secret");
+  });
+
+  it("throws for unknown snapshot preview ids", () => {
+    const baseDir = join("/tmp", `neoclaw-web-snapshot-missing-${Date.now()}`);
+    tmpDirs.push(baseDir);
+    mkdirSync(baseDir, { recursive: true });
+
+    expect(() => readConfigSnapshotPreview(baseDir, "missing.json")).toThrow("snapshot not found");
   });
 
   it("rebuilds existing web dist on startup when webapp sources exist", () => {
