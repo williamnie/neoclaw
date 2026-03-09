@@ -1,40 +1,41 @@
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { navigate } from '../router';
 
-const NAV_ITEMS = [
-  { path: '/app/dashboard', label: 'Dashboard' },
-  { path: '/app/chat', label: 'Chat' },
-  { path: '/app/config', label: 'Config' },
-  { path: '/app/cron', label: 'Cron' },
-  { path: '/app/skills', label: 'Skills' },
-];
+const DASHBOARD_PATH = '/app/dashboard';
 
 export default function AdminLayout({
   pathname,
   children,
+  actions,
 }: {
   pathname: string;
   children: ReactNode;
+  actions?: ReactNode;
 }) {
+  const { t } = useTranslation();
+
   return (
     <div className="admin-shell fade-in">
-      <div className="admin-topbar glass-card">
-        <button type="button" className="admin-brand" onClick={() => navigate('/app/dashboard')}>
-          管理后台
-        </button>
-        <nav className="admin-nav" aria-label="Admin navigation">
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.path}
-              type="button"
-              className={`admin-nav-item ${pathname === item.path ? 'active' : ''}`}
-              onClick={() => navigate(item.path)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
-      </div>
+      <header className="admin-topbar glass-card dashboard-header-shell">
+        <div>
+          <button type="button" className="admin-brand" onClick={() => navigate(DASHBOARD_PATH)}>
+            NeoClaw
+          </button>
+          <p className="admin-tagline">{t('adminTagline')}</p>
+        </div>
+
+        <div className="admin-header-actions">
+          <button
+            type="button"
+            className={`admin-nav-item ${pathname === DASHBOARD_PATH ? 'active' : ''}`}
+            onClick={() => navigate(DASHBOARD_PATH)}
+          >
+            {t('navDashboard')}
+          </button>
+          {actions}
+        </div>
+      </header>
 
       <main className="admin-main">{children}</main>
     </div>

@@ -189,25 +189,6 @@ export default function ConfigWorkspace({ mode, onConfigSaved }: ConfigWorkspace
     }
   })();
 
-  const renderLanguageSwitch = () => (
-    <div className="language-switch" aria-label={t('languageLabel')}>
-      <button
-        type="button"
-        className={`language-btn ${locale === 'zh' ? 'active' : ''}`}
-        onClick={() => i18n.changeLanguage('zh')}
-      >
-        {t('languageZh')}
-      </button>
-      <button
-        type="button"
-        className={`language-btn ${locale === 'en' ? 'active' : ''}`}
-        onClick={() => i18n.changeLanguage('en')}
-      >
-        {t('languageEn')}
-      </button>
-    </div>
-  );
-
   const testChat = async () => {
     if (!testMessage.trim()) return;
     const msg = testMessage;
@@ -668,7 +649,6 @@ export default function ConfigWorkspace({ mode, onConfigSaved }: ConfigWorkspace
   if (loading && step === 1 && providers.length === 0) {
     return (
       <div className="fade-in">
-        {renderLanguageSwitch()}
         <div className="auth-container" style={{ marginTop: '20vh' }}>
           <div><span className="loading-spinner dark-spinner" /> {t('loadingContext')}</div>
         </div>
@@ -678,7 +658,6 @@ export default function ConfigWorkspace({ mode, onConfigSaved }: ConfigWorkspace
 
   return (
     <div className="fade-in">
-      {renderLanguageSwitch()}
       <div className="glass-card onboarding-shell">
         <div className="page-header-row">
           <div>

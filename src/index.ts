@@ -27,7 +27,7 @@ function showHelp(): void {
 Usage: neoclaw [command] [options]
 
 Commands:
-  (default)    Start the agent
+  (default)    Start the agent (does not open Web UI)
   status       Show agent status and cron jobs
   onboard      Initialize workspace and configuration
   cron         Manage scheduled tasks
@@ -170,7 +170,7 @@ async function runAgent(baseDir: string, profileHint: string): Promise<void> {
   const bus = new MessageBus();
   const cron = new CronService(config.agent.workspace, bus);
   await cron.init();
-  const agent = await NeovateAgent.create(config, cron, bus);
+  const agent = await NeovateAgent.create(config, cron, bus, statusStore);
   const channelManager = new ChannelManager(config, bus, statusStore);
   const heartbeat = new HeartbeatService(config.agent.workspace, bus);
 

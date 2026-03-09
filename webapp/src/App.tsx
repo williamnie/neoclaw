@@ -1,39 +1,34 @@
-import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { api } from './api';
+import { api, fetchWithCsrf } from './api';
 import AdminLayout from './layouts/AdminLayout';
 import DashboardPage from './pages/app/dashboard/DashboardPage';
 import ConfigPage from './pages/app/config/ConfigPage';
-import ChatPage from './pages/app/chat/ChatPage';
-import CronPage from './pages/app/cron/CronPage';
-import SkillsPage from './pages/app/skills/SkillsPage';
 import WizardPage from './pages/wizard/WizardPage';
 import { navigate, usePathname } from './router';
 
-const APP_ROUTES = new Set(['/wizard', '/app/dashboard', '/app/chat', '/app/config', '/app/cron', '/app/skills']);
+const DASHBOARD_ROUTE = '/app/dashboard';
+const CONFIG_ROUTE = '/app/config';
+const LOGIN_ROUTE = '/login';
+const WIZARD_ROUTE = '/wizard';
 
-function hasBasicConfig(config: any): boolean {
-  return Boolean(config?.agent?.model?.trim?.() && config?.agent?.workspace?.trim?.());
-}
-
-function resolveRoute(pathname: string, configured: boolean): string {
-  if (pathname === '/') return configured ? '/app/dashboard' : '/wizard';
-  if (!APP_ROUTES.has(pathname)) return configured ? '/app/dashboard' : '/wizard';
-  if (!configured && pathname.startsWith('/app/')) return '/wizard';
-  return pathname;
+function resolveRoute(pathname: string, authenticated: boolean): string {
+  if (!authenticated) return pathname === LOGIN_ROUTE ? pathname : LOGIN_ROUTE;
+  if (pathname === DASHBOARD_ROUTE || pathname === CONFIG_ROUTE || pathname === WIZARD_ROUTE) return pathname;
+  return DASHBOARD_ROUTE;
 }
 
 function LanguageSwitch() {
-  const { i18n } = useTranslation();
+  const { i18n, t } = useTranslation();
   const locale = i18n.resolvedLanguage?.startsWith('zh') ? 'zh' : 'en';
 
   return (
-    <div className="language-switch" aria-label="language switch">
+    <div className="language-switch" aria-label={t('languageLabel')}>
       <button type="button" className={`language-btn ${locale === 'zh' ? 'active' : ''}`} onClick={() => i18n.changeLanguage('zh')}>
-        中文
+        {t('languageZh')}
       </button>
       <button type="button" className={`language-btn ${locale === 'en' ? 'active' : ''}`} onClick={() => i18n.changeLanguage('en')}>
-        EN
+        {t('languageEn')}
       </button>
     </div>
   );
@@ -46,24 +41,20 @@ export default function App() {
   const [needsLogin, setNeedsLogin] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
   const [error, setError] = useState('');
-  const [config, setConfig] = useState<any>(null);
-
-  const configured = useMemo(() => hasBasicConfig(config), [config]);
 
   const refreshBootstrap = async () => {
     try {
       setLoading(true);
       setError('');
-      const res = await api<{ config: any }>('/api/config/current');
-      setConfig(res.config);
+      await api('/api/config/current');
       setNeedsLogin(false);
     } catch (err: any) {
-      const message = err.message || '加载失败';
+      const message = err.message || t('loadFailed');
       if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {
         setNeedsLogin(true);
-      } else {
-        setError(message);
+        return;
       }
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -74,10 +65,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (loading || needsLogin) return;
-    const target = resolveRoute(pathname, configured);
+    if (loading) return;
+    const target = resolveRoute(pathname, !needsLogin);
     if (target !== pathname) navigate(target, { replace: true });
-  }, [configured, loading, needsLogin, pathname]);
+  }, [loading, needsLogin, pathname]);
 
   const handleLogin = async (event: FormEvent) => {
     event.preventDefault();
@@ -91,17 +82,33 @@ export default function App() {
       });
       if (!res.ok) throw new Error(t('invalidToken'));
       await refreshBootstrap();
+      navigate(DASHBOARD_ROUTE, { replace: true });
     } catch (err: any) {
       setError(err.message || t('invalidToken'));
       setLoading(false);
     }
   };
 
+  const handleLogout = async () => {
+    try {
+      await fetchWithCsrf('/auth/logout', { method: 'POST' });
+    } finally {
+      setNeedsLogin(true);
+      setTokenInput('');
+      setError('');
+      navigate(LOGIN_ROUTE, { replace: true });
+    }
+  };
+
+  const handleOpenConfig = () => {
+    navigate(pathname === WIZARD_ROUTE ? DASHBOARD_ROUTE : WIZARD_ROUTE);
+  };
+
   if (loading && !needsLogin) {
     return (
       <div className="fade-in auth-container" style={{ marginTop: '20vh' }}>
         <LanguageSwitch />
-        <div className="glass-card loading-card">正在加载 Web 控制台…</div>
+        <div className="glass-card loading-card">{t('loadingDashboard')}</div>
       </div>
     );
   }
@@ -110,12 +117,13 @@ export default function App() {
     return (
       <div className="fade-in auth-container" style={{ marginTop: '10vh' }}>
         <LanguageSwitch />
-        <div className="glass-card login-card">
-          <h1 className="title">{t('configCenterTitle')}</h1>
-          <p className="subtitle">请输入 Web access token</p>
+        <div className="glass-card login-card login-shell">
+          <div className="login-badge">{t('protectedAccess')}</div>
+          <h1 className="title">{t('dashboardTitle')}</h1>
+          <p className="subtitle">{t('dashboardAccessPrompt')}</p>
           <form onSubmit={handleLogin}>
             <div className="form-group">
-              <label className="form-label">Access Token</label>
+              <label className="form-label">{t('accessToken')}</label>
               <input
                 autoFocus
                 type="password"
@@ -127,7 +135,7 @@ export default function App() {
             </div>
             {error && <div className="error-text">{error}</div>}
             <button className="btn btn-primary" style={{ width: '100%', marginTop: '1rem' }} disabled={loading}>
-              登录
+              {loading ? t('authenticating') : t('login')}
             </button>
           </form>
         </div>
@@ -135,22 +143,26 @@ export default function App() {
     );
   }
 
-  if (pathname === '/wizard') {
-    return (
-      <WizardPage onConfigSaved={() => void refreshBootstrap()} />
-    );
-  }
-
-  let content = <DashboardPage />;
-  if (pathname === '/app/chat') content = <ChatPage />;
-  if (pathname === '/app/config') content = <ConfigPage onConfigSaved={() => void refreshBootstrap()} />;
-  if (pathname === '/app/cron') content = <CronPage />;
-  if (pathname === '/app/skills') content = <SkillsPage />;
+  const isConfigRoute = pathname === CONFIG_ROUTE || pathname === WIZARD_ROUTE;
 
   return (
-    <>
-      <LanguageSwitch />
-      <AdminLayout pathname={pathname}>{content}</AdminLayout>
-    </>
+    <AdminLayout
+      pathname={pathname}
+      actions={
+        <>
+          <LanguageSwitch />
+          <button type="button" className="btn btn-outline" onClick={handleOpenConfig}>
+            {isConfigRoute ? t('backToDashboard') : t('openWizard')}
+          </button>
+          <button type="button" className="btn btn-outline" onClick={() => void handleLogout()}>
+            {t('logout')}
+          </button>
+        </>
+      }
+    >
+      {pathname === CONFIG_ROUTE ? <ConfigPage onConfigSaved={() => void refreshBootstrap()} /> : null}
+      {pathname === WIZARD_ROUTE ? <WizardPage onConfigSaved={() => void refreshBootstrap()} /> : null}
+      {pathname === DASHBOARD_ROUTE ? <DashboardPage /> : null}
+    </AdminLayout>
   );
 }
