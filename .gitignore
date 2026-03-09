@@ -39,3 +39,6 @@ temp/
 tmp/
 
 /.claude/*.local.json
+
+# Playwright artifacts
+.playwright-cli/

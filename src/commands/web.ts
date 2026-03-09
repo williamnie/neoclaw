@@ -240,6 +240,13 @@ function sendHtml(res: ServerResponse, html: string): void {
   res.end(html);
 }
 
+function redirect(res: ServerResponse, location: string, status = 302): void {
+  setSecurityHeaders(res);
+  res.statusCode = status;
+  res.setHeader("Location", location);
+  res.end();
+}
+
 function serveIndexHtml(res: ServerResponse, distDir: string, csrfToken: string): void {
   const indexHtmlPath = join(distDir, "index.html");
   try {
@@ -1350,6 +1357,19 @@ export async function handleWebCommand(opts: WebOptions): Promise<WebCommandResu
           sendJson(res, 429, { error: "Too many requests" });
           return;
         }
+        redirect(res, isAuthorized(req, accessToken) ? "/app/dashboard" : "/login");
+        return;
+      }
+
+      if (url.pathname === "/login" && method === "GET") {
+        if (!authLimiter(ip)) {
+          sendJson(res, 429, { error: "Too many requests" });
+          return;
+        }
+        if (isAuthorized(req, accessToken)) {
+          redirect(res, "/app/dashboard");
+          return;
+        }
         serveIndexHtml(res, distDir, csrfToken);
         return;
       }
@@ -1367,6 +1387,14 @@ export async function handleWebCommand(opts: WebOptions): Promise<WebCommandResu
         }
 
         if (!extname(url.pathname)) {
+          if (!isAuthorized(req, accessToken)) {
+            redirect(res, "/login");
+            return;
+          }
+          if (!["/app/dashboard", "/app/config", "/wizard"].includes(url.pathname)) {
+            redirect(res, "/app/dashboard");
+            return;
+          }
           serveIndexHtml(res, distDir, csrfToken);
           return;
         }
@@ -1391,6 +1419,27 @@ export async function handleWebCommand(opts: WebOptions): Promise<WebCommandResu
         res.setHeader("Set-Cookie", [
           `neoclaw_web_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/`,
           `csrf-token=${csrfToken}; SameSite=Strict; Path=/`
+        ]);
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      if (url.pathname === "/auth/logout" && method === "POST") {
+        if (!isAuthorized(req, accessToken)) {
+          sendJson(res, 401, { error: "Unauthorized" });
+          return;
+        }
+        const csrf = req.headers["x-csrf-token"];
+        if (typeof csrf !== "string" || !safeTokenEqual(csrf, csrfToken)) {
+          sendJson(res, 403, { error: "Invalid CSRF token" });
+          return;
+        }
+        setSecurityHeaders(res);
+        res.statusCode = 200;
+        res.setHeader("Set-Cookie", [
+          "neoclaw_web_token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+          "csrf-token=; SameSite=Strict; Path=/; Max-Age=0",
         ]);
         res.setHeader("Content-Type", "application/json; charset=utf-8");
         res.end(JSON.stringify({ ok: true }));
