@@ -24,6 +24,7 @@ import { createSpawnTool } from "./tools/spawn.js";
 import { createMemoryGetTool, createMemorySearchTool } from "./tools/memory.js";
 import { SubagentManager } from "../services/subagent.js";
 import type { MessageBus } from "../bus/message-bus.js";
+import type { RuntimeStatusStore } from "../runtime/status-store.js";
 
 export class NeovateAgent implements Agent {
   private sessions = new Map<string, SDKSession>();
@@ -41,6 +42,7 @@ export class NeovateAgent implements Agent {
     private config: Config,
     private cronService: CronService,
     private bus: MessageBus,
+    private statusStore: RuntimeStatusStore | undefined,
     sessionManager: SessionManager,
     memoryManager: MemoryManager,
     memoryRetrieval: MemoryRetrievalService,
@@ -62,12 +64,17 @@ export class NeovateAgent implements Agent {
     );
   }
 
-  static async create(config: Config, cronService: CronService, bus: MessageBus): Promise<NeovateAgent> {
+  static async create(
+    config: Config,
+    cronService: CronService,
+    bus: MessageBus,
+    statusStore?: RuntimeStatusStore,
+  ): Promise<NeovateAgent> {
     const sessionsDir = join(config.agent.workspace, "..", "sessions");
     const sessionManager = await SessionManager.create(sessionsDir);
     const memoryManager = await MemoryManager.create(config.agent.workspace);
     const memoryRetrieval = await MemoryRetrievalService.create(config.agent.workspace, config.agent.memorySearch);
-    return new NeovateAgent(config, cronService, bus, sessionManager, memoryManager, memoryRetrieval);
+    return new NeovateAgent(config, cronService, bus, statusStore, sessionManager, memoryManager, memoryRetrieval);
   }
 
   async *processMessage(msg: InboundMessage): AsyncGenerator<OutboundMessage> {
@@ -99,7 +106,7 @@ export class NeovateAgent implements Agent {
     await this.sessionManager.append(key, "user", msg.content);
     await this.sendMessage(sdkSession, msg);
 
-    const stream = processStream(sdkSession, reply);
+    const stream = processStream(sdkSession, reply, (usage) => this.statusStore?.recordUsage(usage));
     let finalContent = "";
     for (;;) {
       const { value, done } = await stream.next();

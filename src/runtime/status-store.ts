@@ -8,6 +8,36 @@ export interface RuntimeErrorEntry {
   message: string;
 }
 
+export interface UsageCounters {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  requests: number;
+}
+
+export interface DailyUsageBucket extends UsageCounters {
+  date: string;
+}
+
+export interface HourlyUsageBucket extends UsageCounters {
+  hour: string;
+}
+
+export interface RuntimeUsageSnapshot {
+  updatedAt?: string;
+  totals: UsageCounters;
+  daily: DailyUsageBucket[];
+  hourly: HourlyUsageBucket[];
+}
+
+export interface UsageRecordInput {
+  inputTokens?: number;
+  outputTokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  requests?: number;
+}
+
 export interface ChannelRuntimeStatus {
   configuredEnabled: boolean;
   running: boolean;
@@ -28,9 +58,12 @@ export interface RuntimeStatusSnapshot {
   };
   channels: Record<string, ChannelRuntimeStatus>;
   recentErrors: RuntimeErrorEntry[];
+  usage: RuntimeUsageSnapshot;
 }
 
 const MAX_ERRORS = 60;
+const MAX_DAILY_BUCKETS = 14;
+const MAX_HOURLY_BUCKETS = 24;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -53,7 +86,77 @@ function createEmptySnapshot(profileDir?: string): RuntimeStatusSnapshot {
     },
     channels: {},
     recentErrors: [],
+    usage: createEmptyUsage(),
   };
+}
+
+function createEmptyCounters(): UsageCounters {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    requests: 0,
+  };
+}
+
+function createEmptyUsage(): RuntimeUsageSnapshot {
+  return {
+    updatedAt: undefined,
+    totals: createEmptyCounters(),
+    daily: [],
+    hourly: [],
+  };
+}
+
+function formatDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatHourKey(date: Date): string {
+  return `${formatDateKey(date)}T${String(date.getHours()).padStart(2, "0")}:00`;
+}
+
+function asNonNegativeInt(value: unknown): number {
+  const parsed = Math.floor(Number(value));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function cloneCounters(input?: Partial<UsageCounters> | null): UsageCounters {
+  return {
+    inputTokens: asNonNegativeInt(input?.inputTokens),
+    outputTokens: asNonNegativeInt(input?.outputTokens),
+    totalTokens: asNonNegativeInt(input?.totalTokens),
+    requests: asNonNegativeInt(input?.requests),
+  };
+}
+
+function normalizeUsage(raw?: Partial<RuntimeUsageSnapshot> | null): RuntimeUsageSnapshot {
+  return {
+    updatedAt: typeof raw?.updatedAt === "string" ? raw.updatedAt : undefined,
+    totals: cloneCounters(raw?.totals),
+    daily: Array.isArray(raw?.daily)
+      ? raw!.daily
+        .filter((entry): entry is DailyUsageBucket => !!entry && typeof entry.date === "string")
+        .map((entry) => ({ date: entry.date, ...cloneCounters(entry) }))
+        .slice(-MAX_DAILY_BUCKETS)
+      : [],
+    hourly: Array.isArray(raw?.hourly)
+      ? raw!.hourly
+        .filter((entry): entry is HourlyUsageBucket => !!entry && typeof entry.hour === "string")
+        .map((entry) => ({ hour: entry.hour, ...cloneCounters(entry) }))
+        .slice(-MAX_HOURLY_BUCKETS)
+      : [],
+  };
+}
+
+function incrementCounters(target: UsageCounters, inputTokens: number, outputTokens: number, requests: number): void {
+  target.inputTokens += inputTokens;
+  target.outputTokens += outputTokens;
+  target.totalTokens += inputTokens + outputTokens;
+  target.requests += requests;
 }
 
 export function runtimeStatusPath(baseDir: string): string {
@@ -72,6 +175,7 @@ export function readRuntimeStatusSnapshot(baseDir: string): RuntimeStatusSnapsho
       agent: { ...createEmptySnapshot(baseDir).agent, ...(raw.agent || {}) },
       channels: { ...(raw.channels || {}) },
       recentErrors: Array.isArray(raw.recentErrors) ? raw.recentErrors.slice(-MAX_ERRORS) : [],
+      usage: normalizeUsage(raw.usage),
       updatedAt: raw.updatedAt || nowIso(),
     };
   } catch {
@@ -136,6 +240,38 @@ export class RuntimeStatusStore {
     this.persist();
   }
 
+  recordUsage(usage: UsageRecordInput): void {
+    const inputTokens = asNonNegativeInt(usage.inputTokens ?? usage.input_tokens);
+    const outputTokens = asNonNegativeInt(usage.outputTokens ?? usage.output_tokens);
+    const requests = usage.requests === undefined ? 1 : asNonNegativeInt(usage.requests);
+    if (inputTokens <= 0 && outputTokens <= 0 && requests <= 0) return;
+
+    const now = new Date();
+    const date = formatDateKey(now);
+    const hour = formatHourKey(now);
+
+    incrementCounters(this.snapshot.usage.totals, inputTokens, outputTokens, requests);
+
+    let dailyBucket = this.snapshot.usage.daily.find((entry) => entry.date === date);
+    if (!dailyBucket) {
+      dailyBucket = { date, ...createEmptyCounters() };
+      this.snapshot.usage.daily.push(dailyBucket);
+      this.snapshot.usage.daily = this.snapshot.usage.daily.slice(-MAX_DAILY_BUCKETS);
+    }
+    incrementCounters(dailyBucket, inputTokens, outputTokens, requests);
+
+    let hourlyBucket = this.snapshot.usage.hourly.find((entry) => entry.hour === hour);
+    if (!hourlyBucket) {
+      hourlyBucket = { hour, ...createEmptyCounters() };
+      this.snapshot.usage.hourly.push(hourlyBucket);
+      this.snapshot.usage.hourly = this.snapshot.usage.hourly.slice(-MAX_HOURLY_BUCKETS);
+    }
+    incrementCounters(hourlyBucket, inputTokens, outputTokens, requests);
+
+    this.snapshot.usage.updatedAt = nowIso();
+    this.persist();
+  }
+
   pushError(scope: string, err: unknown): void {
     const msg = asMessage(err);
     this.snapshot.recentErrors.push({
@@ -155,6 +291,12 @@ export class RuntimeStatusStore {
       agent: { ...this.snapshot.agent },
       channels: { ...this.snapshot.channels },
       recentErrors: this.snapshot.recentErrors.map((x) => ({ ...x })),
+      usage: {
+        updatedAt: this.snapshot.usage.updatedAt,
+        totals: { ...this.snapshot.usage.totals },
+        daily: this.snapshot.usage.daily.map((entry) => ({ ...entry })),
+        hourly: this.snapshot.usage.hourly.map((entry) => ({ ...entry })),
+      },
     };
   }
 
@@ -164,4 +306,3 @@ export class RuntimeStatusStore {
     writeFileSync(this.path, JSON.stringify(this.snapshot, null, 2), "utf-8");
   }
 }
-

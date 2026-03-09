@@ -94,10 +94,26 @@ describe('web API integration', () => {
     try {
       await waitForServer(baseUrl, 60_000);
 
+      const loginPage = await fetch(`${baseUrl}/login`);
+      expect(loginPage.status).toBe(200);
+
+      const logoutWithoutAuth = await fetch(`${baseUrl}/auth/logout`, {
+        method: 'POST',
+      });
+      expect(logoutWithoutAuth.status).toBe(401);
+
+      const protectedPage = await fetch(`${baseUrl}/app/dashboard`, { redirect: 'manual' });
+      expect(protectedPage.status).toBe(302);
+      expect(protectedPage.headers.get('location')).toBe('/login');
+
       const authHeaders = { Authorization: 'Bearer apitest' };
       const bootstrap = await fetch(`${baseUrl}/api/config/current`, { headers: authHeaders });
       expect(bootstrap.status).toBe(200);
       const csrf = parseCsrf(bootstrap.headers.get('set-cookie'));
+
+      const authedDashboard = await fetch(`${baseUrl}/app/dashboard`, { headers: authHeaders });
+      expect(authedDashboard.status).toBe(200);
+
       const stateHeaders = {
         ...authHeaders,
         'Content-Type': 'application/json',

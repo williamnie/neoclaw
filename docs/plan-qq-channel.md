@@ -2,83 +2,42 @@
 
 更新时间：2026-03-08
 
-## 1. 结论（更新版）
+## 1. 结论（先说结论）
 
-结合你补充的参考项目 `sliverp/qqbot`，当前更合理的结论是：
+在当前 `neoclaw` 架构下，**增加一个可用的 QQ channel 可行，建议优先按 OneBot 11 兼容协议接入**，把 QQ 客户端适配层放在 `neoclaw` 外部网关（如 NapCat / 其他兼容实现），`neoclaw` 只负责：
 
-- **优先参考 openclaw 的官方 QQ Bot API 路线**
-- **OneBot 11 兼容接入保留为备选 / 快速验证方案**
+- 接收 inbound 事件
+- 发送 outbound 消息
+- 做 target 规范化、鉴权、去重、热更新
 
-原因不是“OneBot 不能做”，而是：
+这样能最大程度复用现有 `Channel` 抽象、消息总线、配置热更新链路，也能把平台侧不稳定因素隔离在外部桥接层。
 
-- `openclaw` 现成参考已经证明 **QQ 开放平台 Bot API** 这条链路可落地
-- 这条路线更接近“平台官方能力”，后续可维护性通常会更好
-- `qqbot` 使用 **长连接事件订阅** 收消息，不需要暴露公网 webhook，这点对本地部署更友好
+如果目标是“先可用”，建议先做：**OneBot 11 HTTP 入站 + HTTP 出站 + 文本消息 + mention / allowFrom / 去重**。  
+如果目标是“稳定可长期运行”，再补：**持久化去重、重连、限流、媒体消息、错误恢复、系统化测试**。
 
-因此，对 `neoclaw` 的建议改为：
+## 2. 为什么优先 OneBot 11
 
-- **主方案：QQ 开放平台 Bot API channel**
-- **备方案：OneBot 11 channel（NapCat / 兼容实现）**
+从当前可查资料看，QQ 侧有两条路线：
 
-## 2. 新参考：openclaw 的 `qqbot` 插件
+### 方案 A：官方 QQ 开放平台
 
-你提供的参考仓库：
+- 优点：官方能力、文档稳定、合规性更好
+- 缺点：产品模型更偏“官方机器人 / 开放平台应用”，和当前 `neoclaw` 面向“多聊天工具自然收发”的定位不完全一致
+- 更适合：以后如果要做正式平台应用、审核发布、官方事件订阅
 
-- [sliverp/qqbot](https://github.com/sliverp/qqbot)
+### 方案 B：OneBot 11 兼容桥接（推荐 MVP）
 
-从该仓库 README 可以确认几件关键事实：
+- 优点：实现简单，和 `neoclaw` 现有 channel 模型最贴近
+- 优点：消息事件天然适合映射到 `InboundMessage` / `OutboundMessage`
+- 优点：可通过 NapCat 这类桥接层快速打通 QQ 收发
+- 风险：依赖非官方桥接层，稳定性、风控、部署方式需要额外关注
 
-- 它是 **Openclaw 的 QQ channel plugin**，基于 **QQ Open Platform Bot API**
-- 支持 **C2C 私聊、群聊 @消息、频道消息**
-- 它采用 **长连接事件订阅机制** 接收入站消息，而不是要求公开 webhook
-- Openclaw 中的配置方式核心是 `appId` + `clientSecret`
+**结论：**
 
-参考摘取点：
+- **MVP 推荐：OneBot 11 兼容接入**
+- **长期可选：再评估官方 QQ 开放平台适配器**
 
-- README 明确写了它是 “QQ 开放平台 Bot API 的 Openclaw 渠道插件”，并支持 `C2C private chats, group chat @ messages, and channel messages`
-- README 还说明它使用 “long-connection event subscription mechanism” 接收消息
-- 配置示例里，`channels.qqbot` 使用 `appId` 和 `clientSecret`
-
-这直接改变了我们前一版“优先 OneBot”的判断。
-
-## 3. 对 neoclaw 的影响
-
-`neoclaw` 的 channel 架构依然适合做 QQ 接入，但第一版技术路线要重新排序：
-
-### 方案 A：官方 QQ Bot API（推荐）
-
-建议作为正式方案优先评估。
-
-优点：
-
-- 更接近 `openclaw` 的已验证路径
-- 配置模型清晰：`appId` / `clientSecret`
-- 长连接入站更适合 `Channel.start()` 生命周期
-- 不依赖 OneBot / NapCat 这一层额外桥接
-
-风险：
-
-- 官方 API 能力边界要进一步核实
-- 不同消息场景（C2C / 群 @ / 频道）权限和开通步骤可能更复杂
-- 如果要完整支持媒体、输入状态、Markdown，工作量会比最小 OneBot 文本收发更高
-
-### 方案 B：OneBot 11（备选）
-
-适合作为快速验证链路，或在官方能力无法满足时兜底。
-
-优点：
-
-- 开发速度快
-- 容易先打通文本收发
-- 和现有 webhook / HTTP API 形式很贴近
-
-缺点：
-
-- 多依赖一层桥接
-- 平台行为和兼容实现之间可能有差异
-- 长期维护性、稳定性、账号风险更复杂
-
-## 4. 当前 neoclaw 现状（仍然适合落点）
+## 3. 当前 neoclaw 现状（适合落点）
 
 当前仓库已经具备接入新 channel 的主要基础设施：
 
@@ -86,129 +45,136 @@
 - `src/channels/manager.ts` 已负责 channel 注册、启动、停止、热更新、出站分发
 - `src/config/schema.ts` 已有按 channel 组织的配置结构
 - `src/bus/types.ts` 已定义统一的 `InboundMessage` / `OutboundMessage`
-- `src/channels/feishu.ts` 已提供“长连接 / webhook 双模式、target 规范化、去重、配置热更新”的近期参考样板
+- `src/channels/feishu.ts` 已提供“企业 IM + webhook / websocket + target 规范化 + 去重”的近期参考样板
 
-所以，QQ channel 不需要改整体架构，主要是把平台协议映射补齐。
+也就是说，QQ 接入不需要改整体架构，重点是新增一个 `qq` channel 并把配置、目标路由、协议映射补齐。
 
-## 5. 推荐技术方案（修正版）
+## 4. 参考项目可借鉴点
 
-## 5.1 MVP 方向
+## 4.1 openclaw 可借鉴点
 
-建议第一版先做 **官方 QQ Bot API 的最小可用 channel**，能力范围收窄为：
+虽然 `openclaw` 当前同级仓库里没有直接可复用的 QQ 实现，但它在 channel 演进上有几个很值得借鉴的点：
 
-- C2C 私聊收发
-- 群聊 @消息入站
-- 文本 outbound
-- 基础配置校验
-- 基础错误处理
+- **target 规范化明确**：统一 `user:` / `channel:` 语义，避免平台 ID 歧义
+- **channel routing 思路成熟**：路由由宿主决定，模型不直接决定 channel
+- **多 channel 元数据组织清晰**：新增 channel 时，能力边界、target 规则、文档入口清楚
 
-如果在实现中遇到官方权限、文档、账号或 SDK 稳定性阻碍，再切到 OneBot 备选方案。
+对 `neoclaw` 的启发：
 
-## 5.2 运行形态建议
+- QQ 也应尽早确定统一 target 语义，而不是让业务层直接拼 OneBot 原始字段
+- 建议从一开始就支持 `group:` / `private:` 这类稳定前缀
 
-基于 `qqbot` README 的线索，`neoclaw` 的官方 QQ channel 更适合设计为：
+## 4.2 Memoh-v2 可借鉴点
 
-- `start()` 中建立长连接事件订阅
-- 事件到来后映射为 `InboundMessage`
-- `send()` 中调用 QQ Bot API 发送消息
-- `stop()` 中关闭连接并清理资源
+`Memoh-v2` 的 channel 设计更接近我们当前要做的事：
 
-这和 `feishu` 的 websocket 模式、以及现有 `ChannelManager` 的生命周期模型是匹配的。
+- `adapter / descriptor / config / target` 分层清楚
+- `manager` 负责连接生命周期与消息分发
+- 适配器内部专注平台协议映射
 
-## 5.3 配置草案（官方路线）
+对 `neoclaw` 的启发：
+
+- QQ channel 内部最好拆出“配置校验 / target 解析 / 事件解析 / outbound 发送”几个 helper
+- 不要把所有协议逻辑揉成一个超大文件；即便先单文件实现，也应按 helper 函数分层
+
+## 5. QQ Channel 推荐技术方案
+
+## 5.1 MVP 协议与部署形态
+
+建议第一版采用：
+
+- `neoclaw` 作为 **OneBot 11 HTTP 反向上报接收方**
+- `neoclaw` 通过 **OneBot 11 HTTP API** 调用外部 QQ 网关发消息
+- 外部 QQ 网关建议兼容 OneBot 11（如 NapCat）
+
+这样对应到当前 `neoclaw` 最自然：
+
+- inbound：类似现有 webhook channel
+- outbound：类似现有 HTTP API 发送型 channel
+
+首版**不建议**一上来就做 reverse websocket：
+
+- 调试链路更复杂
+- 热更新与断线恢复成本更高
+- 先用 HTTP 打通最短路径，后续再补 websocket 模式更稳妥
+
+## 5.2 chatId / senderId 规范
+
+建议在 `neoclaw` 内部统一为：
+
+- 群消息：`chatId = "group:<group_id>"`
+- 私聊：`chatId = "private:<user_id>"`
+- 发送者：`senderId = "<user_id>|<nickname?>"`
+
+Outbound 目标建议支持以下输入：
+
+- `group:<group_id>`
+- `private:<user_id>`
+- `qq:group:<group_id>`
+- `qq:private:<user_id>`
+
+不建议直接暴露 OneBot 原始 target 结构给上层业务，否则后续替换桥接层会很痛。
+
+## 5.3 推荐配置草案
 
 建议在 `src/config/schema.ts` 增加：
 
 ```ts
 interface QQConfig {
   enabled: boolean;
-  appId: string;
-  clientSecret: string;
-  sandboxOnly?: boolean;
+  apiBase: string;
+  accessToken: string;
+  webhookPort: number;
+  webhookPath: string;
+  secret?: string;
   allowFrom?: string[];
   requireMention?: boolean;
-  apiBase?: string;
-  wsIntentMask?: number;
-  reconnectBaseMs?: number;
-  reconnectMaxMs?: number;
   dedupPersist?: boolean;
   dedupFile?: string;
+  webhookMaxBodyBytes?: number;
+  webhookBodyTimeoutMs?: number;
+  webhookRateLimitPerMin?: number;
 }
 ```
 
-首版重点：
+首版就应该把这些留出来：
 
-- `appId`
-- `clientSecret`
-- `allowFrom`
-- `requireMention`
-- 基础重连参数
-- 可选去重持久化
+- 基础鉴权：`accessToken` / `secret`
+- 入站安全：body 限额、超时、简单限流
+- 运行稳定性：去重持久化
+- 群聊控制：`requireMention`
 
-## 5.4 target / chatId 规范建议
+## 5.4 OneBot 事件映射建议
 
-内部建议统一成稳定格式，不直接暴露平台原始字段：
+### inbound
 
-- 私聊：`chatId = "qq:private:<openid-or-userid>"`
-- 群聊：`chatId = "qq:group:<groupid>"`
-- 频道：`chatId = "qq:channel:<channelid>"`
+OneBot 常见事件可先支持：
 
-发送目标建议兼容：
+- `message.private`
+- `message.group`
 
-- `private:<id>`
-- `group:<id>`
-- `channel:<id>`
-- `qq:private:<id>`
-- `qq:group:<id>`
-- `qq:channel:<id>`
+映射建议：
 
-如果后续官方 SDK 对不同场景的 target 结构不一致，也能在 channel 内部消化掉。
+- `post_type=message`
+- `message_type=private|group`
+- `raw_message` / 文本 segment 合成为 `content`
+- `user_id` → `senderId`
+- `group_id` / `user_id` → `chatId`
+- `message_id`、`self_id`、原始 payload 放进 `metadata`
 
-## 5.5 入站事件映射建议
+### outbound
 
-第一阶段优先支持：
+首版仅支持文本：
 
-- 私聊消息
-- 群聊 @消息
-- 可选：频道消息
+- `group:<id>` → `send_group_msg`
+- `private:<id>` → `send_private_msg`
 
-映射为：
+第二阶段再补：
 
-- `senderId`：`<user-id>|<nickname?>`
-- `chatId`：按 `private/group/channel` 规范化
-- `content`：优先纯文本；富文本先做降级抽取
-- `metadata`：保留原始 `messageId`、`eventId`、`scene`、原始 payload 摘要
+- 图片 / 文件 / 回复引用
+- 合并转发 / markdown / richer segments
 
-## 6. 参考项目可借鉴点
-
-## 6.1 `sliverp/qqbot`
-
-最值得借鉴：
-
-- 官方 QQ Bot API 路线已走通
-- 长连接事件订阅模型适合 channel 生命周期
-- 配置入口足够简单，先用 `appId` / `clientSecret`
-- 支持场景比较完整，后续可按能力逐步补齐
-
-## 6.2 openclaw 思路
-
-虽然本地 `openclaw` 仓库里没有内嵌 QQ 代码，但从插件模式上可以借鉴：
-
-- 平台协议差异尽量封装在 channel / plugin 内部
-- 宿主层只关心统一消息模型和路由
-- target 语义要先收敛，避免上层业务直接拼平台字段
-
-## 6.3 Memoh-v2 思路
-
-可借鉴它的适配器分层方式：
-
-- 配置校验
-- target 解析
-- inbound 事件转换
-- outbound 发送
-- 生命周期管理
-
-## 7. 开发切入点
+## 6. 开发切入点
 
 建议变更点如下：
 
@@ -220,81 +186,86 @@ interface QQConfig {
 - 如 Web 管理台要支持，再补 `webapp` 的 channels 配置 UI
 - 新增 `src/channels/__tests__/qq.test.ts`
 
-## 8. 分阶段计划
+## 7. 分阶段计划
 
-## 阶段 A：官方 QQ 协议调研定稿（0.5~1 天）
+## 阶段 A：协议与模型定稿（0.5 天）
 
-- 确认官方 SDK / API 接入方式
-- 确认私聊、群 @、频道消息对应事件模型
-- 敲定 `chatId` / `senderId` / outbound target 规范
-- 敲定配置字段和默认值
+- 明确 MVP 只支持 OneBot 11 HTTP 模式
+- 敲定 `chatId` / `senderId` / outbound target 格式
+- 明确配置字段与默认值
 
 验收标准：
 
-- 形成一份稳定的协议映射说明
-- 不再把 MVP 建立在 OneBot 假设上
+- 有一份稳定 target 规范，不再反复改名
+- 配置字段足够支持本地调试与最小线上部署
 
-## 阶段 B：最小可用实现（1~1.5 天）
+## 阶段 B：最小可用实现（1 天）
 
 - 新增 `QQChannel`
-- 建立官方事件长连接
-- 实现文本消息 inbound / outbound
+- 实现 webhook 接收入站
+- 实现 HTTP API 文本发送
 - 实现 `allowFrom`、`requireMention`
-- 接入 `manager`、`schema`、状态展示、配置热更新
+- 接入 `manager`、`schema`、`status`、配置热更新
 
 验收标准：
 
 - QQ 私聊可收发
-- 群聊 @ 后可触发
-- 配置错误能直接定位到关键字段
+- QQ 群聊被 @ 后可收发
+- 配置更新后无需重启即可生效（能力允许范围内）
 
 ## 阶段 C：稳定性补齐（1~1.5 天）
 
-- 自动重连
 - 入站去重（内存 + 可选持久化）
-- 同 chat 顺序保证
-- 错误码与日志包装
+- webhook body 限额 / 超时 / 限流
+- 同 chat 串行处理与错误日志完善
+- OneBot 错误码包装成可读报错
 
 验收标准：
 
-- 断连后能恢复
-- 重复事件不会重复入队
-- 常见错误具备可读日志
+- 重复事件不会短时间内重复入队
+- 异常请求可快速 fail-close
+- 常见配置错误能直接定位
 
 ## 阶段 D：消息能力增强（1 天）
 
-- 图片 / 文件 / 语音
-- 输入中状态
-- Markdown / 富文本降级
+- 图片 / 文件发送
 - 回复引用映射
+- 更多 CQ / segment 转纯文本规则
 
 验收标准：
 
-- 常见消息不会明显丢语义
-- 富媒体行为有清晰回退策略
+- 常见消息格式不会乱码或整段丢失
+- 回复链在主要场景可用
 
 ## 阶段 E：测试与文档（0.5~1 天）
 
 - 单测：target 解析、配置校验、事件解析、去重
-- 接入文档：QQ 平台创建 Bot、拿 `AppID/AppSecret`、本地运行说明
+- 文档：接入步骤、示例配置、NapCat 对接说明
 - 如有需要，再补 Web 配置面板
 
 验收标准：
 
 - 核心逻辑有回归保护
-- 新用户可独立完成接入
+- 新用户可按文档独立完成接入
 
-## 9. 主要风险点
+## 8. 主要风险点
 
-- 官方 QQ 平台的权限、审核、沙箱能力可能限制真实使用场景
-- 群聊 / 频道场景和私聊场景的 API 可能不完全一致
-- 富媒体与 Markdown 支持成本可能高于纯文本
-- 现阶段 `neoclaw` 还没有现成官方 QQ SDK 接入样板，首版需要多做协议摸底
+- **平台侧风险**：QQ 桥接层不是 `neoclaw` 自己控制，登录态与风控要单独兜底
+- **协议差异**：不同 OneBot 兼容实现细节可能不完全一致
+- **消息格式**：CQ / segment 到纯文本、媒体、引用的映射容易出现边界问题
+- **群聊触发**：`@` 识别、昵称提及、撤回重放都要谨慎处理
+- **现有工作区脏状态**：当前仓库已有未提交改动，开发时要避免和现有 Web 控制台改动互相污染
 
-## 10. 当前建议的实际开发顺序
+## 9. 我建议的实际开发顺序
 
-1. 先补官方 QQ Bot API 的协议调研
-2. 先实现私聊 + 群 @ 文本消息
-3. 暂缓媒体和复杂富文本
-4. 先把测试补在 `src/channels/__tests__/qq.test.ts`
-5. Web UI 最后接，避免配置字段反复变动
+1. 先做 `阶段 A + B`
+2. 先不碰媒体与复杂 segment
+3. 先只支持 `group:` / `private:` 两类 target
+4. 先把测试补在 `qq.test.ts`
+5. Web UI 最后接，避免在协议还没定时反复改表单
+
+## 10. 参考资料
+
+- OneBot 11 规范（消息与 API 基础）
+- NapCat 官方仓库（OneBot 11 兼容桥接）
+- QQ 开放平台官方文档（若后续要走官方机器人路线）
