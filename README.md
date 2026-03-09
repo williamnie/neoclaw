@@ -15,6 +15,7 @@ A multi-channel AI agent built with [Neovate Code](https://github.com/neovate-co
 - **Profiles** — multiple isolated configurations via `--profile`
 - **Hot reload** — config changes apply without restart
 - **Heartbeat** — built-in health monitoring
+- **Web admin console** — Dashboard, Chat, Config, Cron, and Skills management
 
 ## Install
 
@@ -38,9 +39,28 @@ neoclaw onboard --mode web
 # Edit config
 # ~/.neoclaw/config.json
 
-# Start the agent
+# Start the agent only (does NOT open the Web UI)
 neoclaw
+
+# Or open the Web admin console when you want Dashboard / config UI
+neoclaw web --host 127.0.0.1 --port 8788
 ```
+
+If running from source, you can choose whether to open the Web UI:
+
+```bash
+# Start the agent only (does NOT open the Web UI)
+bun run start
+
+# Open the Web admin console from source
+bun run start web --host 127.0.0.1 --port 8788
+```
+
+In other words, the Web page is **optional**:
+
+- `neoclaw` / `bun run start` → start the agent only
+- `neoclaw web` / `bun run start web` → open the Web admin console
+- `neoclaw onboard --mode web` → start from onboarding in the Web UI
 
 ## CLI Usage
 
@@ -72,9 +92,14 @@ Open web config panel:
 ```bash
 neoclaw web --dev --host 127.0.0.1 --port 8788
 
+# from source
+bun run start web --dev --host 127.0.0.1 --port 8788
+
 # or start from onboarding flow
 neoclaw onboard --mode web
 ```
+
+Note: `neoclaw` and `bun run start` do **not** open the Web page by default. Use the `web` command only when you want the Dashboard / config UI.
 
 If running from source, build frontend first:
 
@@ -88,6 +113,23 @@ Web panel supports:
 - Runtime read-only status (`/api/runtime-status`) with recent errors
 - Config export/import (`/api/config/export`, `/api/config/import`)
 - Auto snapshot before import + rollback from snapshots (`/api/config/snapshots`, `/api/config/rollback`)
+
+
+## Web Admin Console
+
+The Web console now includes:
+
+- `Dashboard` — runtime, config, cron, skill, and error summaries
+- `Chat` — persistent Web Chat with session management
+- `Config` — the single configuration center
+- `Cron` — create/pause/resume/delete scheduled jobs
+- `Skills` — local skill management plus `clawhub` market search/install
+
+Useful docs:
+
+- `CHANGELOG.md`
+- `docs/2026-03-07-web-admin-console-validation.md`
+- `docs/designs/2026-03-07-web-admin-console-v1-design.md`
 
 ## Configuration
 
@@ -158,7 +200,8 @@ Requires [Bun](https://bun.sh). Do not use npm to install dependencies.
 ```bash
 bun install          # Install dependencies
 bun dev              # Watch mode
-bun start            # Run from source
+bun start            # Run agent from source (no Web page)
+bun run start web    # Open Web admin console from source
 bun run typecheck    # Type check
 bun run build        # Build for distribution
 bun run build:web    # Build web assets to dist/web

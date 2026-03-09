@@ -1,36 +1,88 @@
-import { type FormEvent, useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { api, fetchWithCsrf } from './api';
-import AdminLayout from './layouts/AdminLayout';
-import DashboardPage from './pages/app/dashboard/DashboardPage';
-import ConfigPage from './pages/app/config/ConfigPage';
-import WizardPage from './pages/wizard/WizardPage';
-import { navigate, usePathname } from './router';
+import { api, type ModelOption, type ProviderMeta } from '../../../api';
+import {
+  buildExportFilename,
+  collectChangedPaths,
+  downloadJsonFile,
+  formatBytes,
+  formatSnapshotReason,
+  formatTimestamp,
+  mergeImportedConfigPreview,
+  readJsonFile,
+  sanitizePreviewConfig,
+  summarizeChangedPaths,
+  toFormConfig,
+  type ConfigSnapshotMeta,
+} from '../../../config-management';
 
-const DASHBOARD_ROUTE = '/app/dashboard';
-const CONFIG_ROUTE = '/app/config';
-const LOGIN_ROUTE = '/login';
-const WIZARD_ROUTE = '/wizard';
+type CustomApiFormat = 'openai' | 'responses' | 'anthropic' | 'google';
 
-function resolveRoute(pathname: string, authenticated: boolean): string {
-  if (!authenticated) return pathname === LOGIN_ROUTE ? pathname : LOGIN_ROUTE;
-  if (pathname === DASHBOARD_ROUTE || pathname === CONFIG_ROUTE || pathname === WIZARD_ROUTE) return pathname;
-  return DASHBOARD_ROUTE;
-}
+type AutoStartState = {
+  enabled: boolean;
+  started: boolean;
+  alreadyStarted?: boolean;
+  command?: string;
+  error?: string;
+};
 
-function LanguageSwitch() {
-  const { i18n, t } = useTranslation();
+type SaveConfigResult = {
+  startCommand?: string;
+};
+
+type RuntimeStatusResponse = {
+  agent?: {
+    running?: boolean;
+  };
+};
+
+type CurrentConfigResponse = {
+  config: any;
+};
+
+type SnapshotListResponse = {
+  snapshots: ConfigSnapshotMeta[];
+};
+
+type SnapshotPreviewResponse = {
+  snapshot: ConfigSnapshotMeta;
+  config: any;
+};
+
+type ConfigMutationResponse = {
+  ok: boolean;
+  config: any;
+  snapshot?: ConfigSnapshotMeta;
+  backup?: ConfigSnapshotMeta;
+};
+
+type PreviewState = {
+  mode: 'import' | 'rollback';
+  title: string;
+  subtitle: string;
+  config: any;
+  changedPaths: string[];
+  topSections: string[];
+  filename?: string;
+  snapshot?: ConfigSnapshotMeta;
+  payload?: any;
+};
+
+const CUSTOM_API_FORMATS: CustomApiFormat[] = ['openai', 'responses', 'anthropic', 'google'];
+
+export type ConfigWorkspaceProps = {
+  mode: 'wizard' | 'config';
+  onConfigSaved?: () => void;
+};
+
+export default function ConfigWorkspace({ mode, onConfigSaved }: ConfigWorkspaceProps) {
+  const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage?.startsWith('zh') ? 'zh' : 'en';
 
-  return (
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const [needsLogin, setNeedsLogin] = useState(false);
-  const [tokenInput, setTokenInput] = useState('');
-
   const [step, setStep] = useState(1);
-  const [viewMode, setViewMode] = useState<'wizard' | 'config'>('wizard');
   const [providers, setProviders] = useState<ProviderMeta[]>([]);
   const [currentConfigRaw, setCurrentConfigRaw] = useState<any>(null);
 
@@ -49,7 +101,6 @@ function LanguageSwitch() {
       cli: { enabled: true },
       dingtalk: { enabled: false, clientId: '', clientSecret: '', robotCode: '', corpId: '', allowFrom: '', keepAlive: false },
       feishu: { enabled: false, appId: '', appSecret: '', allowFrom: '', domain: 'feishu', connectionMode: 'websocket', verificationToken: '' },
-      qq: { enabled: false, appId: '', clientSecret: '', allowFrom: '', requireMention: true, apiBase: 'https://api.sgroup.qq.com', wsIntentMask: (1 << 30) | (1 << 12) | (1 << 25) },
     },
     providers: {},
     logLevel: 'info',
@@ -84,10 +135,15 @@ function LanguageSwitch() {
   const [confirmingPreview, setConfirmingPreview] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const savedDraft = useMemo(() => toFormConfig(currentConfigRaw || {}), [currentConfigRaw]);
+  const unsavedChangedPaths = useMemo(() => collectChangedPaths(savedDraft, configDraft), [savedDraft, configDraft]);
+  const unsavedSummary = useMemo(() => summarizeChangedPaths(unsavedChangedPaths), [unsavedChangedPaths]);
+  const hasUnsavedChanges = unsavedChangedPaths.length > 0;
+
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
-    document.title = t('initTitle');
-  }, [locale, t]);
+    document.title = mode === 'config' ? t('configManagementTitle') : t('initTitle');
+  }, [locale, mode, t]);
 
   useEffect(() => {
     const zhDefault = i18n.getFixedT('zh')('defaultTestMessage');
@@ -100,6 +156,16 @@ function LanguageSwitch() {
   useEffect(() => {
     checkContext();
   }, []);
+
+  useEffect(() => {
+    const handler = (event: BeforeUnloadEvent) => {
+      if (!hasUnsavedChanges) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [hasUnsavedChanges]);
 
   const providerAuthLabel = (provider: ProviderMeta): string => {
     if (provider.authType === 'oauth') return t('providerOAuthRequired');
@@ -123,25 +189,6 @@ function LanguageSwitch() {
     }
   })();
 
-  const renderLanguageSwitch = () => (
-    <div className="language-switch" aria-label={t('languageLabel')}>
-      <button type="button" className={`language-btn ${locale === 'zh' ? 'active' : ''}`} onClick={() => i18n.changeLanguage('zh')}>
-        {t('languageZh')}
-      </button>
-      <button type="button" className={`language-btn ${locale === 'en' ? 'active' : ''}`} onClick={() => i18n.changeLanguage('en')}>
-        {t('languageEn')}
-      </button>
-    </div>
-  );
-}
-
-export default function App() {
-  const { t } = useTranslation();
-  const pathname = usePathname();
-  const [loading, setLoading] = useState(true);
-  const [needsLogin, setNeedsLogin] = useState(false);
-  const [tokenInput, setTokenInput] = useState('');
-  const [error, setError] = useState('');
   const testChat = async () => {
     if (!testMessage.trim()) return;
     const msg = testMessage;
@@ -186,157 +233,440 @@ export default function App() {
 
   const loadSnapshots = async () => {
     try {
-      const { config } = await api('/api/config/current');
-
-      setConfigDraft((prev: any) => ({
-        ...prev,
-        agent: { ...prev.agent, ...config.agent },
-        channels: {
-          telegram: { ...config.channels?.telegram, allowFrom: config.channels?.telegram?.allowFrom?.join(',') || '' },
-          cli: { ...config.channels?.cli },
-          dingtalk: { ...config.channels?.dingtalk, allowFrom: config.channels?.dingtalk?.allowFrom?.join(',') || '' },
-          feishu: {
-            ...config.channels?.feishu,
-            allowFrom: config.channels?.feishu?.allowFrom?.join(',') || '',
-            domain: config.channels?.feishu?.domain || 'feishu',
-            connectionMode: config.channels?.feishu?.connectionMode || 'websocket',
-          },
-          qq: {
-            ...config.channels?.qq,
-            allowFrom: config.channels?.qq?.allowFrom?.join(',') || '',
-            apiBase: config.channels?.qq?.apiBase || 'https://api.sgroup.qq.com',
-            wsIntentMask: config.channels?.qq?.wsIntentMask || ((1 << 30) | (1 << 12) | (1 << 25)),
-          },
-        },
-        providers: config.providers || {},
-        logLevel: config.logLevel || 'info',
-      }));
-
-  const refreshBootstrap = async () => {
-    try {
-      setLoading(true);
-      setError('');
-      await api('/api/config/current');
-      setNeedsLogin(false);
+      setSnapshotsLoading(true);
+      const res = await api<SnapshotListResponse>('/api/config/snapshots');
+      setSnapshots(res.snapshots || []);
     } catch (err: any) {
-      const message = err.message || t('loadFailed');
-      if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {
-        setNeedsLogin(true);
-        return;
+      setManagementError(err.message || t('configManagementLoadFailed'));
+    } finally {
+      setSnapshotsLoading(false);
+    }
+  };
+
+  const checkContext = async () => {
+    try {
+      const { config } = await api<CurrentConfigResponse>('/api/config/current');
+      applyServerConfig(config);
+      await Promise.all([refreshRuntimeStatus(), loadSnapshots()]);
+      const res = await api('/api/providers/list');
+      setProviders(res.providers || []);
+      setLoading(false);
+    } catch (err: any) {
+      setError(err.message || t('failedLoadContext'));
+      setLoading(false);
+    }
+  };
+
+  const startOAuth = async () => {
+    if (!selectedProvider) return;
+    try {
+      setOAuthWait(true);
+      const res = await api('/api/providers/auth/start', { providerId: selectedProvider.id });
+      if (res.authUrl) {
+        window.open(res.authUrl, '_blank');
+        setOAuthSessionId(res.oauthSessionId);
+        if (res.userCode) {
+          setOAuthUserCode(res.userCode);
+        }
       }
-      setError(message);
-    } finally {
-      setLoading(false);
+    } catch (err: any) {
+      setError(err.message);
+      setOAuthWait(false);
     }
   };
 
-  useEffect(() => {
-    void refreshBootstrap();
-  }, []);
+  const checkOAuthPoll = async () => {
+    if (!oAuthSessionId) return;
+    try {
+      const res = await api('/api/providers/auth/poll', { oauthSessionId: oAuthSessionId });
+      if (res.status === 'completed' || res.ok) {
+        setIsOAuthComplete(true);
+        setOAuthWait(false);
+      } else if (res.status === 'pending') {
+        // Keep waiting, maybe auto-poll in useEffect for real app.
+      } else {
+        throw new Error(`${t('oauthFailed')}: ${res.error}`);
+      }
+    } catch (err: any) {
+      setError(err.message);
+      setOAuthWait(false);
+    }
+  };
 
-  useEffect(() => {
-    if (loading) return;
-    const target = resolveRoute(pathname, !needsLogin);
-    if (target !== pathname) navigate(target, { replace: true });
-  }, [loading, needsLogin, pathname]);
+  const completeManualOAuth = async () => {
+    if (!oAuthCode || !selectedProvider || !oAuthSessionId) return;
+    try {
+      await api('/api/providers/auth/complete', { providerId: selectedProvider.id, oauthSessionId: oAuthSessionId, code: oAuthCode });
+      setIsOAuthComplete(true);
+      setOAuthWait(false);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
 
-  const handleLogin = async (event: FormEvent) => {
-    event.preventDefault();
+  const pullModels = async () => {
+    if (!selectedProvider) return;
+    setIsFetchingModels(true);
+    setError('');
+    try {
+      let payload: any = {};
+      if (selectedProvider.id === 'custom') {
+        payload = {
+          mode: 'custom',
+          customProvider: {
+            ...customProviderObj,
+            api: customProviderObj.apiFormat,
+            options: {
+              ...(apiKey ? { apiKey } : {}),
+              ...(baseURL ? { baseURL } : {}),
+            },
+          },
+        };
+        setConfigDraft((prev: any) => ({
+          ...prev,
+          providers: {
+            ...prev.providers,
+            [customProviderObj.id]: {
+              ...customProviderObj,
+              api: customProviderObj.apiFormat,
+              options: {
+                ...(apiKey ? { apiKey } : {}),
+                ...(baseURL ? { baseURL } : {}),
+              },
+            },
+          },
+        }));
+      } else {
+        payload = {
+          providerId: selectedProvider.id,
+          apiKey,
+          baseURL,
+        };
+        setConfigDraft((prev: any) => ({
+          ...prev,
+          providers: {
+            ...prev.providers,
+            [selectedProvider.id]: {
+              options: {
+                ...(apiKey ? { apiKey } : {}),
+                ...(baseURL ? { baseURL } : {}),
+              },
+            },
+          },
+        }));
+      }
+
+      const res = await api('/api/providers/models', payload);
+      setModels(res.models || []);
+
+      if (selectedProvider.id === 'custom' && res.provider) {
+        setConfigDraft((prev: any) => ({
+          ...prev,
+          providers: {
+            ...prev.providers,
+            [res.provider.id]: res.provider,
+          },
+        }));
+      }
+
+      if (res.models && res.models.length > 0) {
+        setConfigDraft((prev: any) => ({
+          ...prev,
+          agent: { ...prev.agent, model: res.models[0].value },
+        }));
+      }
+      setStep(2);
+    } catch (err: any) {
+      setError(`${t('failedPullModels')}: ${err.message}`);
+    } finally {
+      setIsFetchingModels(false);
+    }
+  };
+
+  const saveConfig = async () => {
     try {
       setLoading(true);
-      setError('');
-      const res = await fetch('/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: tokenInput }),
-      });
-      if (!res.ok) throw new Error(t('invalidToken'));
-      await refreshBootstrap();
-      navigate(DASHBOARD_ROUTE, { replace: true });
+      const res = await api<SaveConfigResult>('/api/config/save', configDraft);
+      setAutoStartState(null);
+      setStartCommand(res.startCommand || 'neoclaw');
+      if ((res as any).config) {
+        applyServerConfig((res as any).config);
+      }
+      await refreshRuntimeStatus();
+      onConfigSaved?.();
+      setStep(4);
     } catch (err: any) {
-      setError(err.message || t('invalidToken'));
+      let msg = err.message;
+      if (err.details && Array.isArray(err.details)) {
+        msg += `\n${err.details.join('\n')}`;
+      }
+      setError(msg);
+    } finally {
       setLoading(false);
     }
   };
 
-  const handleLogout = async () => {
+  const exportConfig = async () => {
     try {
-      await fetchWithCsrf('/auth/logout', { method: 'POST' });
-    } finally {
-      setNeedsLogin(true);
-      setTokenInput('');
-      setError('');
-      navigate(LOGIN_ROUTE, { replace: true });
+      setManagementError('');
+      setManagementSuccess('');
+      const config = await api('/api/config/export');
+      downloadJsonFile(config, buildExportFilename());
+      setManagementSuccess(t('configExportSuccess'));
+    } catch (err: any) {
+      setManagementError(err.message || t('configExportFailed'));
     }
   };
 
-  const handleOpenConfig = () => {
-    navigate(pathname === WIZARD_ROUTE ? DASHBOARD_ROUTE : WIZARD_ROUTE);
+  const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !currentConfigRaw) return;
+
+    try {
+      setManagementError('');
+      setManagementSuccess('');
+      const payload = await readJsonFile(file);
+      const merged = mergeImportedConfigPreview(currentConfigRaw, payload);
+      const previewConfig = sanitizePreviewConfig(merged);
+      const summary = summarizeChangedPaths(collectChangedPaths(currentConfigRaw, previewConfig));
+      setPreviewState({
+        mode: 'import',
+        title: t('configImportPreviewTitle'),
+        subtitle: t('configImportPreviewSubtitle'),
+        filename: file.name,
+        payload,
+        config: previewConfig,
+        changedPaths: summary.paths,
+        topSections: summary.topSections,
+      });
+    } catch (err: any) {
+      setManagementError(`${t('configImportInvalidFile')}: ${err.message}`);
+    } finally {
+      event.target.value = '';
+    }
   };
 
-  if (loading && !needsLogin) {
-    return (
-      <div className="fade-in auth-container" style={{ marginTop: '20vh' }}>
-        <LanguageSwitch />
-        <div className="glass-card loading-card">{t('loadingDashboard')}</div>
-      </div>
-    );
-  }
+  const previewSnapshot = async (snapshot: ConfigSnapshotMeta) => {
+    try {
+      setPreviewLoading(true);
+      setManagementError('');
+      setManagementSuccess('');
+      const res = await api<SnapshotPreviewResponse>(`/api/config/snapshots/${encodeURIComponent(snapshot.id)}`);
+      const previewConfig = sanitizePreviewConfig(res.config);
+      const summary = summarizeChangedPaths(collectChangedPaths(currentConfigRaw || {}, previewConfig));
+      setPreviewState({
+        mode: 'rollback',
+        title: t('configRollbackPreviewTitle'),
+        subtitle: t('configRollbackPreviewSubtitle'),
+        snapshot: res.snapshot,
+        config: previewConfig,
+        changedPaths: summary.paths,
+        topSections: summary.topSections,
+      });
+    } catch (err: any) {
+      setManagementError(err.message || t('configSnapshotPreviewFailed'));
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
 
-  if (needsLogin) {
-    return (
-      <div className="fade-in auth-container" style={{ marginTop: '10vh' }}>
-        <LanguageSwitch />
-        <div className="glass-card login-card login-shell">
-          <div className="login-badge">{t('protectedAccess')}</div>
-          <h1 className="title">{t('dashboardTitle')}</h1>
-          <p className="subtitle">{t('dashboardAccessPrompt')}</p>
-          <form onSubmit={handleLogin}>
-            <div className="form-group">
-              <label className="form-label">{t('accessToken')}</label>
+  const closePreview = () => {
+    setPreviewState(null);
+    setConfirmingPreview(false);
+  };
+
+  const confirmPreviewAction = async () => {
+    if (!previewState) return;
+
+    try {
+      setConfirmingPreview(true);
+      setManagementError('');
+      setManagementSuccess('');
+
+      if (previewState.mode === 'import') {
+        const res = await api<ConfigMutationResponse>('/api/config/import', previewState.payload);
+        applyServerConfig(res.config);
+        setStep(resolveStepFromConfig(res.config));
+        onConfigSaved?.();
+        await loadSnapshots();
+        setManagementSuccess(
+          res.snapshot
+            ? `${t('configImportSuccess')} ${t('configImportSnapshotHint')} ${formatTimestamp(res.snapshot.createdAt, locale)}`
+            : t('configImportSuccess'),
+        );
+      } else {
+        const res = await api<ConfigMutationResponse>('/api/config/rollback', { id: previewState.snapshot?.id });
+        applyServerConfig(res.config);
+        setStep(resolveStepFromConfig(res.config));
+        onConfigSaved?.();
+        await loadSnapshots();
+        setManagementSuccess(
+          res.backup
+            ? `${t('configRollbackSuccess')} ${t('configRollbackSnapshotHint')} ${formatTimestamp(res.backup.createdAt, locale)}`
+            : t('configRollbackSuccess'),
+        );
+      }
+
+      closePreview();
+    } catch (err: any) {
+      setManagementError(err.message || t('configMutationFailed'));
+    } finally {
+      setConfirmingPreview(false);
+    }
+  };
+
+  const startAgent = async () => {
+    try {
+      setIsStartingAgent(true);
+      const res = await api<AutoStartState>('/api/agent/start', {});
+      setAutoStartState(res);
+      if (res.command) setStartCommand(res.command);
+      if (res.started || res.alreadyStarted) setAgentRunning(true);
+    } catch (err: any) {
+      setAutoStartState({ enabled: true, started: false, command: startCommand, error: err.message });
+    } finally {
+      setIsStartingAgent(false);
+    }
+  };
+
+  const resolvedStartCommand = autoStartState?.command || startCommand || 'neoclaw';
+  const autoStarted = agentRunning || !!autoStartState?.started || !!autoStartState?.alreadyStarted;
+  const startHint = autoStartState
+    ? autoStarted
+      ? autoStartState.alreadyStarted
+        ? t('autoStartAlreadyHint')
+        : t('autoStartSuccessHint')
+      : t('autoStartFailedHint')
+    : agentRunning ? t('autoStartAlreadyHint') : t('clickStartHint');
+
+  const previewSectionLabel = previewState?.topSections.length
+    ? previewState.topSections.join(', ')
+    : t('configPreviewNoChanges');
+
+  const previewPathList = previewState?.changedPaths.slice(0, 12) || [];
+
+  const configManagementPanel = (
+    <section className="config-management-shell">
+      <div className="config-management-card">
+        <div className="config-management-header">
+          <div>
+            <h2 className="config-management-title">{t('configManagementTitle')}</h2>
+            <p className="config-management-subtitle">{t('configManagementSubtitle')}</p>
+          </div>
+        </div>
+
+        <div className="config-management-meta">
+          <span>{t('configSavedStatus')}</span>
+          <strong>{currentConfigRaw?.agent?.model || t('configNotConfigured')}</strong>
+          <span>·</span>
+          <span>{currentConfigRaw?.agent?.workspace || t('configWorkspaceMissing')}</span>
+          <span>·</span>
+          <span>{t('configSnapshotCount', { count: snapshots.length })}</span>
+        </div>
+
+        {managementError && <div className="error-text config-feedback config-feedback-error">{managementError}</div>}
+        {managementSuccess && <div className="success-text config-feedback config-feedback-success">{managementSuccess}</div>}
+        {mode === 'config' && hasUnsavedChanges && (
+          <div className="config-unsaved-banner">
+            <strong>存在未保存变更</strong>
+            <span>{unsavedSummary.paths.length} 项变更 · {unsavedSummary.topSections.join('、') || '配置'}</span>
+          </div>
+        )}
+
+        <details className="config-section" open>
+          <summary className="config-section-summary">
+            <div>
+              <strong>{t('configActionsTitle')}</strong>
+              <span>{t('configActionsSubtitle')}</span>
+            </div>
+          </summary>
+          <div className="config-section-body">
+            <div className="config-management-actions">
+              <button type="button" className="btn btn-outline" onClick={exportConfig}>
+                {t('configExportButton')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {t('configImportButton')}
+              </button>
               <input
-                autoFocus
-                type="password"
-                className="form-input"
-                value={tokenInput}
-                onChange={(event) => setTokenInput(event.target.value)}
-                placeholder={t('accessTokenPlaceholder')}
+                ref={fileInputRef}
+                type="file"
+                accept="application/json,.json"
+                style={{ display: 'none' }}
+                onChange={handleImportFile}
               />
             </div>
-            {error && <div className="error-text">{error}</div>}
-            <button className="btn btn-primary" style={{ width: '100%', marginTop: '1rem' }} disabled={loading}>
-              {loading ? t('authenticating') : t('login')}
+          </div>
+        </details>
+
+        <details className="config-section" open>
+          <summary className="config-section-summary">
+            <div>
+              <strong>{t('configHistoryTitle')}</strong>
+              <span>{t('configHistorySubtitle')}</span>
+            </div>
+            <button type="button" className="btn btn-outline" onClick={(event) => { event.preventDefault(); loadSnapshots(); }} disabled={snapshotsLoading}>
+              {snapshotsLoading ? t('configSnapshotsRefreshing') : t('configSnapshotsRefresh')}
             </button>
-          </form>
+          </summary>
+          <div className="config-section-body">
+            {snapshots.length === 0 ? (
+              <div className="config-snapshot-empty">
+                {snapshotsLoading ? t('configSnapshotsLoading') : t('configSnapshotsEmpty')}
+              </div>
+            ) : (
+              <div className="config-snapshot-list">
+                {snapshots.map((snapshot) => (
+                  <button
+                    key={snapshot.id}
+                    type="button"
+                    className="config-snapshot-item"
+                    onClick={() => previewSnapshot(snapshot)}
+                    disabled={previewLoading || confirmingPreview}
+                  >
+                    <div className="config-snapshot-main">
+                      <strong>{formatSnapshotReason(snapshot.reason, locale)}</strong>
+                      <span>{formatTimestamp(snapshot.createdAt, locale)}</span>
+                    </div>
+                    <div className="config-snapshot-side">
+                      <span>{formatBytes(snapshot.size)}</span>
+                      <span>{t('configPreviewRollbackAction')}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </details>
+      </div>
+    </section>
+  );
+
+  if (loading && step === 1 && providers.length === 0) {
+    return (
+      <div className="fade-in">
+        <div className="auth-container" style={{ marginTop: '20vh' }}>
+          <div><span className="loading-spinner dark-spinner" /> {t('loadingContext')}</div>
         </div>
       </div>
     );
   }
 
-  const isConfigRoute = pathname === CONFIG_ROUTE || pathname === WIZARD_ROUTE;
-
   return (
-    <AdminLayout
-      pathname={pathname}
-      actions={
-        <>
-          <LanguageSwitch />
-          <button type="button" className="btn btn-outline" onClick={handleOpenConfig}>
-            {isConfigRoute ? t('backToDashboard') : t('openWizard')}
-          </button>
-          <button type="button" className="btn btn-outline" onClick={() => void handleLogout()}>
-            {t('logout')}
-          </button>
-        </>
-      }
-    >
-      {pathname === CONFIG_ROUTE ? <ConfigPage onConfigSaved={() => void refreshBootstrap()} /> : null}
-      {pathname === WIZARD_ROUTE ? <WizardPage onConfigSaved={() => void refreshBootstrap()} /> : null}
-      {pathname === DASHBOARD_ROUTE ? <DashboardPage /> : null}
-    </AdminLayout>
+    <div className="fade-in">
+      <div className="glass-card onboarding-shell">
+        <div className="page-header-row">
+          <div>
+            <h1 className="title">{mode === 'config' ? t('configManagementTitle') : t('initTitle')}</h1>
+            <p className="subtitle">{mode === 'config' ? t('configManagementSubtitle') : t('initSubtitle')}</p>
+          </div>
         </div>
 
-        {viewMode === 'wizard' && step < 4 && (
+        {mode === 'wizard' && step < 4 && (
           <div className="step-indicator">
             <div className={`step ${step >= 1 ? 'completed' : ''}`}>1</div>
             <div className={`step ${step >= 2 ? (step === 2 ? 'active' : 'completed') : ''}`}>2</div>
@@ -344,9 +674,9 @@ export default function App() {
           </div>
         )}
 
-        {viewMode === 'wizard' && error && <div className="form-group"><div className="error-text" style={{ background: '#fee2e2', padding: '1rem', borderRadius: 8 }}>{error}</div></div>}
+        {mode === 'wizard' && error && <div className="form-group"><div className="error-text" style={{ background: '#fee2e2', padding: '1rem', borderRadius: 8 }}>{error}</div></div>}
 
-        {viewMode === 'wizard' && step === 1 && (
+        {mode === 'wizard' && step === 1 && (
           <div className="fade-in">
             <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>{t('step1Title')}</h2>
 
@@ -491,7 +821,7 @@ export default function App() {
           </div>
         )}
 
-        {viewMode === 'wizard' && step === 2 && (
+        {mode === 'wizard' && step === 2 && (
           <div className="fade-in">
             <h2 style={{ marginBottom: '1.5rem', fontSize: '1.25rem' }}>{t('step2Title')}</h2>
 
@@ -556,7 +886,7 @@ export default function App() {
           </div>
         )}
 
-        {viewMode === 'wizard' && step === 3 && (
+        {mode === 'wizard' && step === 3 && (
           <div className="fade-in">
             <h2 style={{ marginBottom: '1.5rem', fontSize: '1.25rem' }}>{t('step3Title')}</h2>
 
@@ -655,66 +985,6 @@ export default function App() {
               </div>
             )}
 
-            <label className="checkbox-label" style={{ marginBottom: '1rem' }}>
-              <input type="checkbox" checked={configDraft.channels.qq.enabled} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, enabled: e.target.checked } } })} />
-              {t('enableQQ')}
-            </label>
-
-            {configDraft.channels.qq.enabled && (
-              <div className="advanced-panel fade-in">
-                <p style={{ color: '#64748b', marginBottom: '1rem', lineHeight: 1.6, fontSize: '0.95rem' }}>{t('qqSetupHint')}</p>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                  <div className="form-group">
-                    <label className="form-label">{t('qqAppId')}</label>
-                    <input type="text" placeholder={t('qqAppIdPlaceholder')} className="form-input" value={configDraft.channels.qq.appId} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, appId: e.target.value } } })} />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">{t('qqClientSecret')}</label>
-                    <input type="password" placeholder={t('qqClientSecretPlaceholder')} className="form-input" value={configDraft.channels.qq.clientSecret} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, clientSecret: e.target.value } } })} />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">{t('allowedUserIds')}</label>
-                    <input type="text" placeholder={t('qqAllowFromPlaceholder')} className="form-input" value={configDraft.channels.qq.allowFrom} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, allowFrom: e.target.value } } })} />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">{t('qqApiBase')}</label>
-                    <input type="text" placeholder={t('qqApiBasePlaceholder')} className="form-input" value={configDraft.channels.qq.apiBase || ''} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, apiBase: e.target.value } } })} />
-                  </div>
-                  <div className="form-group">
-                    <label className="checkbox-label">
-                      <input type="checkbox" checked={configDraft.channels.qq.requireMention !== false} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, requireMention: e.target.checked } } })} />
-                      {t('qqRequireMention')}
-                    </label>
-                    <div style={{ color: '#94a3b8', fontSize: '0.85rem', marginTop: '0.35rem' }}>{t('qqRequireMentionHint')}</div>
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">{t('qqIntentMask')}</label>
-                    <input type="number" placeholder={t('qqIntentMaskPlaceholder')} className="form-input" value={configDraft.channels.qq.wsIntentMask || 0} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, wsIntentMask: parseInt(e.target.value || '0', 10) } } })} />
-                    <div style={{ color: '#94a3b8', fontSize: '0.85rem', marginTop: '0.35rem' }}>{t('qqIntentMaskHint')}</div>
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">{t('qqReconnectBaseMs')}</label>
-                    <input type="number" placeholder="1000" className="form-input" value={configDraft.channels.qq.wsReconnectBaseMs || 1000} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, wsReconnectBaseMs: parseInt(e.target.value || '0', 10) } } })} />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">{t('qqReconnectMaxMs')}</label>
-                    <input type="number" placeholder="30000" className="form-input" value={configDraft.channels.qq.wsReconnectMaxMs || 30000} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, wsReconnectMaxMs: parseInt(e.target.value || '0', 10) } } })} />
-                  </div>
-                  <div className="form-group">
-                    <label className="checkbox-label">
-                      <input type="checkbox" checked={configDraft.channels.qq.dedupPersist === true} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, dedupPersist: e.target.checked } } })} />
-                      {t('qqDedupPersist')}
-                    </label>
-                    <div style={{ color: '#94a3b8', fontSize: '0.85rem', marginTop: '0.35rem' }}>{t('qqDedupPersistHint')}</div>
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">{t('qqDedupFile')}</label>
-                    <input type="text" placeholder={t('qqDedupFilePlaceholder')} className="form-input" value={configDraft.channels.qq.dedupFile || ''} onChange={(e) => setConfigDraft({ ...configDraft, channels: { ...configDraft.channels, qq: { ...configDraft.channels.qq, dedupFile: e.target.value } } })} />
-                  </div>
-                </div>
-              </div>
-            )}
-
             <div className="actions">
               <button className="btn btn-outline" onClick={() => setStep(2)}>{t('back')}</button>
               <button className="btn btn-primary" onClick={saveConfig} disabled={loading}>{loading ? t('saving') : t('finishAndSave')}</button>
@@ -722,7 +992,7 @@ export default function App() {
           </div>
         )}
 
-        {viewMode === 'wizard' && step === 4 && (
+        {mode === 'wizard' && step === 4 && (
           <div className="fade-in" style={{ padding: '2rem 0' }}>
             <div style={{ textAlign: 'center' }}>
               <div style={{ fontSize: '4rem', marginBottom: '1rem' }}>🎉</div>
@@ -797,7 +1067,7 @@ export default function App() {
             </div>
           </div>
         )}
-        {viewMode === 'config' && configManagementPanel}
+        {mode === 'config' && configManagementPanel}
       </div>
 
       {previewState && (
