@@ -243,7 +243,7 @@
   "dashboardDaysAgo_one": "{{count}} day ago",
   "dashboardDaysAgo_other": "{{count}} days ago",
   "dashboardHeroTitle": "NeoClaw Runtime Overview",
-  "dashboardHeroSubtitle": "Today's token usage, agent status, and channel health in one place."
+  "dashboardHeroSubtitle": "Today's token usage, agent status, and channel health in one place.",
   "enableQQ": "Enable QQ Bot",
   "qqAppId": "QQ App ID *",
   "qqClientSecret": "QQ Client Secret *",

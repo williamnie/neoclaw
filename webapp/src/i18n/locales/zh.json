@@ -243,7 +243,7 @@
   "dashboardDaysAgo_one": "{{count}} 天前",
   "dashboardDaysAgo_other": "{{count}} 天前",
   "dashboardHeroTitle": "NeoClaw 运行总览",
-  "dashboardHeroSubtitle": "聚合今日 Token 消耗、Agent 运行状态与通道健康度。"
+  "dashboardHeroSubtitle": "聚合今日 Token 消耗、Agent 运行状态与通道健康度。",
   "enableQQ": "启用 QQ Bot",
   "qqAppId": "QQ App ID *",
   "qqClientSecret": "QQ Client Secret *",
