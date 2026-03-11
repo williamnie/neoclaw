@@ -98,7 +98,8 @@
   "saving": "Saving...",
   "finishAndSave": "Finish & Save ✓",
   "saveSuccessTitle": "Configuration Saved Successfully!",
-  "saveSuccessSubtitle": "Your Neoclaw agent configuration has been updated. The backend watcher will hot-reload your new settings automatically!",
+  "saveSuccessSubtitle": "Your Neoclaw agent configuration has been updated. You can start the agent when you're ready.",
+  "saveSuccessSubtitleRunning": "Configuration updated. The agent is running, so please restart it manually to apply the new settings.",
   "whatsNextTitle": "🚀 What's Next?",
   "whatsNextHint": "To start interacting with your AI agent, go back to your terminal and exit this Configuration Wizard (Ctrl+C), then run the following command:",
   "bunHintPrefix": "If you are using Bun from source, run:",
@@ -190,6 +191,7 @@
   "dashboardAccessPrompt": "Enter your Web Access Token to continue",
   "dashboardLoadFailed": "Failed to load dashboard",
   "dashboardStartFailed": "Failed to start agent",
+  "dashboardRestartFailed": "Failed to restart agent",
   "dashboardLoading": "Loading dashboard data…",
   "dashboardRunningBadge": "Agent Running",
   "dashboardStoppedBadge": "Agent Offline",
@@ -197,6 +199,8 @@
   "dashboardRefreshing": "Refreshing…",
   "dashboardStartAgent": "Start Agent",
   "dashboardStartingAgent": "Starting…",
+  "dashboardRestartAgent": "Restart Agent",
+  "dashboardRestartingAgent": "Restarting…",
   "dashboardTodayTokens": "Today's Tokens",
   "dashboardTokenBreakdown": "Input {{input}} · Output {{output}}",
   "dashboardTodayRequests": "Today's Requests",
@@ -263,5 +267,7 @@
   "qqIntentMaskPlaceholder": "Default 1107297280",
   "qqIntentMaskHint": "The default covers public guild messages, direct messages, and group/C2C events. Usually you can keep it unchanged.",
   "qqDedupPersistHint": "When enabled, inbound dedup state is persisted so restarts are less likely to reprocess the same event.",
-  "qqDedupFilePlaceholder": "For example ~/.neoclaw/qq-dedup.json"
+  "qqDedupFilePlaceholder": "For example ~/.neoclaw/qq-dedup.json",
+  "enableAcp": "Enable ACP Multi-Agent Orchestration",
+  "acpDefaultAgent": "Default Proposer Model"
 }

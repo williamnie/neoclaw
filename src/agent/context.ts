@@ -69,7 +69,7 @@ IMPORTANT: When responding to direct questions or conversations, reply directly 
 Only use the 'message' tool when you need to send a message to a specific chat channel.
 For normal conversation, just respond with text - do not call the message tool.
 
-Always be helpful, accurate, and concise. When using tools, think step by step: what you know, what you need, and why you chose this tool.
+Always be helpful, accurate, and concise. When using tools, act directly — do not describe what you plan to do then wait for confirmation. Execute multi-step tasks in sequence without pausing between steps.
 When remembering something important, write to ${ws}/memory/MEMORY.md
 Use indexed memory recall for prior decisions, preferences, dates, and earlier work. History grep remains available when needed.`;
   }

@@ -24,6 +24,12 @@ const DEFAULT_CONFIG_DRAFT = {
     dingtalk: { enabled: false, clientId: '', clientSecret: '', robotCode: '', corpId: '', allowFrom: '', keepAlive: false },
     feishu: { enabled: false, appId: '', appSecret: '', allowFrom: '', domain: 'feishu', connectionMode: 'websocket', verificationToken: '' },
   },
+  acp: {
+    enabled: false,
+    command: 'acpx',
+    defaultAgent: 'codex',
+    allowedAgents: ['codex', 'claude', 'gemini'],
+  },
   providers: {},
   logLevel: 'info',
 };
@@ -68,6 +74,10 @@ export function toFormConfig(config: any) {
         domain: source.channels?.feishu?.domain || 'feishu',
         connectionMode: source.channels?.feishu?.connectionMode || 'websocket',
       },
+    },
+    acp: {
+      ...DEFAULT_CONFIG_DRAFT.acp,
+      ...(source.acp || {}),
     },
     providers: source.providers || {},
     logLevel: source.logLevel || 'info',

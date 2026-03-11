@@ -29,7 +29,7 @@ export async function* processStream(
 
   for await (const m of session.receive()) {
     if (m.type === "system") {
-      logger.debug("agent", `init session=${m.sessionId} model=${m.model} tools=${m.tools.join(",")}`);
+      logger.debug("agent", `init session=${m.sessionId} model=${m.model} sdk-reported-tools=${m.tools.length > 0 ? m.tools.join(",") : "(empty - custom tools registered via plugin hook)"}`);
 
     } else if (m.type === "message" && "role" in m && m.role === "assistant") {
       if ((m as any).usage) {

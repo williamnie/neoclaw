@@ -98,7 +98,8 @@
   "saving": "保存中...",
   "finishAndSave": "完成并保存 ✓",
   "saveSuccessTitle": "配置已保存！",
-  "saveSuccessSubtitle": "Neoclaw 配置已更新，后端 watcher 会自动热加载新配置。",
+  "saveSuccessSubtitle": "Neoclaw 配置已更新，你可以稍后启动 Agent。",
+  "saveSuccessSubtitleRunning": "配置已更新，Agent 正在运行，请手动重启以应用新配置。",
   "whatsNextTitle": "🚀 下一步",
   "whatsNextHint": "回到终端并退出配置向导（Ctrl+C），然后执行以下命令开始与 Agent 交互：",
   "bunHintPrefix": "若你是从源码运行 Bun，请执行：",
@@ -190,6 +191,7 @@
   "dashboardAccessPrompt": "请输入 Web Access Token 进入控制台",
   "dashboardLoadFailed": "加载仪表盘失败",
   "dashboardStartFailed": "启动 Agent 失败",
+  "dashboardRestartFailed": "重启 Agent 失败",
   "dashboardLoading": "正在加载仪表盘数据…",
   "dashboardRunningBadge": "Agent 运行中",
   "dashboardStoppedBadge": "Agent 未运行",
@@ -197,6 +199,8 @@
   "dashboardRefreshing": "刷新中…",
   "dashboardStartAgent": "启动 Agent",
   "dashboardStartingAgent": "启动中…",
+  "dashboardRestartAgent": "重启 Agent",
+  "dashboardRestartingAgent": "重启中…",
   "dashboardTodayTokens": "今日 Token",
   "dashboardTokenBreakdown": "输入 {{input}} · 输出 {{output}}",
   "dashboardTodayRequests": "今日请求数",
@@ -263,5 +267,7 @@
   "qqIntentMaskPlaceholder": "默认 1107297280",
   "qqIntentMaskHint": "默认值覆盖频道消息、频道私信、群聊与 C2C。通常保持默认即可。",
   "qqDedupPersistHint": "开启后会把入站去重状态落盘，重启后也能尽量避免重复处理。",
-  "qqDedupFilePlaceholder": "例如 ~/.neoclaw/qq-dedup.json"
+  "qqDedupFilePlaceholder": "例如 ~/.neoclaw/qq-dedup.json",
+  "enableAcp": "启用 ACP 多智能体并行编排工作流",
+  "acpDefaultAgent": "默认主控模型 (Proposer)"
 }

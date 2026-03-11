@@ -100,11 +100,30 @@ export interface MemoryFlushConfig {
   timeoutMs?: number;
 }
 
+export interface AcpConfig {
+  enabled: boolean;
+  command: string;                    // 默认 "acpx"
+  defaultAgent: "codex" | "claude" | "gemini";
+  allowedAgents: string[];
+  defaultPermission: "approve-reads" | "approve-all" | "deny-all";
+  timeoutSec: number;                 // 默认 300
+  maxParallelRuns: number;            // 默认 2
+  maxStepRetries: number;             // 默认 2
+  retryBackoffMs: number;             // 默认 3000
+  autoEnsureSession: boolean;         // 默认 true
+  fallbackToCodeTool: boolean;        // 默认 true
+  artifactDir: string;
+  logDir: string;
+  stateDir: string;
+  agentCommandOverrides?: Record<string, string>;
+}
+
 export interface Config {
   agent: AgentConfig;
   channels: ChannelsConfig;
   providers?: Record<string, ProviderConfig>;
   logLevel?: string;
+  acp?: AcpConfig;
 }
 
 export function defaultConfig(baseDir: string): Config {
@@ -169,6 +188,22 @@ export function defaultConfig(baseDir: string): Config {
       },
     },
     logLevel: "debug",
+    acp: {
+      enabled: false,
+      command: "acpx",
+      defaultAgent: "codex",
+      allowedAgents: ["codex", "claude", "gemini"],
+      defaultPermission: "approve-reads",
+      timeoutSec: 300,
+      maxParallelRuns: 2,
+      maxStepRetries: 2,
+      retryBackoffMs: 3000,
+      autoEnsureSession: true,
+      fallbackToCodeTool: true,
+      artifactDir: join(baseDir, "workspace", "artifacts", "acp-runs"),
+      logDir: join(baseDir, "workspace", "logs", "acp"),
+      stateDir: join(baseDir, "workspace", "state"),
+    },
   };
 }
 
@@ -333,6 +368,9 @@ export function loadConfig(baseDir: string): Config {
       feishu: { ...defaults.channels.feishu, ...raw.channels?.feishu },
       qq: { ...defaults.channels.qq, ...raw.channels?.qq },
     };
+    if (raw.acp) {
+      config.acp = { ...defaults.acp!, ...raw.acp };
+    }
   } else {
     config = structuredClone(defaults);
     mkdirSync(baseDir, { recursive: true });
@@ -365,6 +403,15 @@ export function ensureWorkspaceDirs(workspace: string): void {
     join(workspace, "skills"),
     join(workspace, "memory"),
     join(workspace, "logs"),
+  ];
+  for (const d of dirs) mkdirSync(d, { recursive: true });
+}
+
+export function ensureAcpDirs(acpConfig: AcpConfig): void {
+  const dirs = [
+    acpConfig.artifactDir,
+    acpConfig.logDir,
+    acpConfig.stateDir,
   ];
   for (const d of dirs) mkdirSync(d, { recursive: true });
 }

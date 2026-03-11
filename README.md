@@ -115,6 +115,44 @@ Web panel supports:
 - Auto snapshot before import + rollback from snapshots (`/api/config/snapshots`, `/api/config/rollback`)
 
 
+## ACP (Agent Coding Pipeline)
+
+Neoclaw provides an asynchronous, multi-agent orchestration pipeline called **ACP**. It allows you to delegate complex coding tasks to different specialized agents (e.g., one for planning, one for reviewing, one for implementing) running entirely in the background.
+
+### Enabling ACP
+Update your `config.json` to enable the ACP subsystem:
+
+```json
+{
+  "acp": {
+    "enabled": true,
+    "command": "acpx",
+    "defaultAgent": "codex",
+    "allowedAgents": ["codex", "claude", "gemini"]
+  }
+}
+```
+
+### Usage in Chat
+
+Once enabled, you can interact with ACP via natural language or slash commands directly in any connected chat channel (Web UI, Telegram, Feishu, etc.):
+
+**1. Long-running Multi-Agent Workflows**
+Ask the agent to start an ACP workflow:
+> *"Help me build an authentication module using ACP. Use codex for the design doc, claude for review, and gemini for implementation."*
+
+The main agent will acknowledge the submission and immediately hand it off to the `WorkflowOrchestrator`. You will receive background progress updates as the workflow advances through its DAG (Directed Acyclic Graph) steps.
+
+**2. Human-In-The-Loop (HITL) Commands**
+If a workflow hits an irrecoverable error or explicitly requires your intervention, it will pause and notify you. Once you have resolved the issue (e.g., fixing a merge conflict manually), you can resume it:
+- `/acp resume <runId>` - Resume a suspended workflow.
+- `/acp cancel <runId>` - Forcefully stop and discard a running workflow.
+
+**3. Short-lived Task Executions**
+You can also ask the agent to run quick, single-step tasks using ACP:
+> *"Run an acp_run task to analyze the current directory structure."*
+
+
 ## Web Admin Console
 
 The Web console now includes:

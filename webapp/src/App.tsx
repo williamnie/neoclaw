@@ -42,9 +42,11 @@ export default function App() {
   const [tokenInput, setTokenInput] = useState('');
   const [error, setError] = useState('');
 
-  const refreshBootstrap = async () => {
+  const refreshBootstrap = async (options?: { silent?: boolean }) => {
     try {
-      setLoading(true);
+      if (!options?.silent) {
+        setLoading(true);
+      }
       setError('');
       await api('/api/config/current');
       setNeedsLogin(false);
@@ -56,7 +58,9 @@ export default function App() {
       }
       setError(message);
     } finally {
-      setLoading(false);
+      if (!options?.silent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -161,7 +165,7 @@ export default function App() {
       }
     >
       {pathname === CONFIG_ROUTE ? <ConfigPage onConfigSaved={() => void refreshBootstrap()} /> : null}
-      {pathname === WIZARD_ROUTE ? <WizardPage onConfigSaved={() => void refreshBootstrap()} /> : null}
+      {pathname === WIZARD_ROUTE ? <WizardPage onConfigSaved={() => void refreshBootstrap({ silent: true })} /> : null}
       {pathname === DASHBOARD_ROUTE ? <DashboardPage /> : null}
     </AdminLayout>
   );

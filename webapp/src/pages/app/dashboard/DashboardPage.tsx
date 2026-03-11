@@ -203,6 +203,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [startingAgent, setStartingAgent] = useState(false);
+  const [restartingAgent, setRestartingAgent] = useState(false);
   const [error, setError] = useState('');
 
   const locale = i18n.resolvedLanguage?.startsWith('zh') ? 'zh-CN' : 'en-US';
@@ -249,6 +250,21 @@ export default function DashboardPage() {
       setError(err.message || t('dashboardStartFailed'));
     } finally {
       setStartingAgent(false);
+    }
+  };
+
+  const handleRestartAgent = async () => {
+    try {
+      setRestartingAgent(true);
+      setError('');
+      await api('/api/agent/restart', {});
+      window.setTimeout(() => {
+        void load(true);
+      }, 1500);
+    } catch (err: any) {
+      setError(err.message || t('dashboardRestartFailed'));
+    } finally {
+      setRestartingAgent(false);
     }
   };
 
@@ -311,6 +327,11 @@ export default function DashboardPage() {
           <button type="button" className="btn btn-outline" onClick={() => void load(true)} disabled={refreshing}>
             {refreshing ? t('dashboardRefreshing') : t('dashboardRefresh')}
           </button>
+          {runtime?.agent.running && (
+            <button type="button" className="btn btn-outline" onClick={() => void handleRestartAgent()} disabled={restartingAgent}>
+              {restartingAgent ? t('dashboardRestartingAgent') : t('dashboardRestartAgent')}
+            </button>
+          )}
           {!runtime?.agent.running && (
             <button type="button" className="btn btn-primary" onClick={() => void handleStartAgent()} disabled={startingAgent}>
               {startingAgent ? t('dashboardStartingAgent') : t('dashboardStartAgent')}

@@ -2,8 +2,9 @@
 
 ## Guidelines
 
-- Always explain what you're doing before taking actions
-- Ask for clarification when the request is ambiguous
+- Execute tasks directly — do not describe what you will do then wait for confirmation. Act immediately.
+- When a request involves multiple steps, execute them all in sequence without pausing for approval between steps.
+- Only ask for clarification when critical information is truly missing and cannot be reasonably inferred.
 - Use tools to help accomplish tasks
 - Remember important information in your memory files
 

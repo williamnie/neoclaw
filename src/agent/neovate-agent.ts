@@ -1,5 +1,5 @@
 import { join } from "path";
-import { createSession, prompt, type SDKSession } from "@neovate/code";
+import { createSession, createTool, prompt, type SDKSession, _zod as z } from "@neovate/code";
 import type { Agent } from "./agent.js";
 import type { InboundMessage, OutboundMessage } from "../bus/types.js";
 import { replyTarget, sessionKey } from "../bus/types.js";
@@ -25,6 +25,11 @@ import { createMemoryGetTool, createMemorySearchTool } from "./tools/memory.js";
 import { SubagentManager } from "../services/subagent.js";
 import type { MessageBus } from "../bus/message-bus.js";
 import type { RuntimeStatusStore } from "../runtime/status-store.js";
+import { AcpExecutor } from "../services/acp/executor.js";
+import { AcpSessionRouter } from "../services/acp/session-router.js";
+import { WorkflowOrchestrator } from "../services/acp/orchestrator.js";
+import { createAcpRunTool } from "./tools/acp-run.js";
+import { createAcpWorkflowTool } from "./tools/acp-workflow.js";
 
 export class NeovateAgent implements Agent {
   private sessions = new Map<string, SDKSession>();
@@ -37,6 +42,9 @@ export class NeovateAgent implements Agent {
   private memoryFlushService: MemoryFlushService;
   private memoryRetrieval: MemoryRetrievalService;
   private subagentManager: SubagentManager;
+  private acpExecutor?: AcpExecutor;
+  private acpSessionRouter?: AcpSessionRouter;
+  private acpOrchestrator?: WorkflowOrchestrator;
 
   private constructor(
     private config: Config,
@@ -62,6 +70,23 @@ export class NeovateAgent implements Agent {
       (message, options) => prompt(message, options),
       config.agent.model,
     );
+
+    if (config.acp?.enabled) {
+      this.acpExecutor = new AcpExecutor({
+        command: config.acp.command || "acpx",
+        workspace: config.agent.workspace,
+        allowedBaseDir: config.agent.workspace,
+      });
+      this.acpSessionRouter = new AcpSessionRouter(config.acp, this.acpExecutor);
+      this.acpOrchestrator = new WorkflowOrchestrator(
+        this.acpExecutor,
+        this.acpSessionRouter,
+        this.bus,
+        config.acp,
+        this.statusStore
+      );
+      logger.info("agent", "ACP Executor and Orchestrator initialized.");
+    }
   }
 
   static async create(
@@ -108,7 +133,7 @@ export class NeovateAgent implements Agent {
 
     const stream = processStream(sdkSession, reply, (usage) => this.statusStore?.recordUsage(usage));
     let finalContent = "";
-    for (;;) {
+    for (; ;) {
       const { value, done } = await stream.next();
       if (done) { finalContent = value; break; }
       yield value;
@@ -151,8 +176,34 @@ export class NeovateAgent implements Agent {
     if (msg.content === "/help") {
       const skills = await this.skillManager.getSkills();
       const skillLines = skills.map((s) => s.description ? `/${s.name} - ${s.description}` : `/${s.name}`).join("\n");
-      const base = "Commands:\n/new - Start a new session\n/stop - Stop the current agent\n/help - Show this help";
+      const base = "Commands:\n/new - Start a new session\n/stop - Stop the current agent\n/acp resume <id> - Resume suspended workflow\n/acp cancel <id> - Cancel running workflow\n/help - Show this help";
       yield reply(skillLines ? `${base}\n\nSkills:\n${skillLines}` : base);
+      return true;
+    }
+
+    if (msg.content.startsWith("/acp ")) {
+      if (!this.acpOrchestrator) {
+        yield reply("ACP is not enabled in configuration.");
+        return true;
+      }
+      const args = msg.content.trim().split(" ");
+      const action = args[1];
+      const runId = args[2];
+
+      if (!runId) {
+        yield reply("Usage: /acp <resume|cancel> <runId>");
+        return true;
+      }
+
+      if (action === "resume") {
+        const ok = await this.acpOrchestrator.resume(runId);
+        yield reply(ok ? `Workflow ${runId} resumption triggered.` : `Failed to resume workflow ${runId}. Not found or not suspended.`);
+      } else if (action === "cancel") {
+        const ok = await this.acpOrchestrator.cancel(runId);
+        yield reply(ok ? `Workflow ${runId} cancelled.` : `Failed to cancel workflow ${runId}. Not found or already finished.`);
+      } else {
+        yield reply("Unknown ACP action. Supported: resume, cancel");
+      }
       return true;
     }
 
@@ -205,6 +256,7 @@ export class NeovateAgent implements Agent {
     mediaQueue: MediaQueue,
     sessionRecap?: string,
   ): Promise<SDKSession> {
+    logger.info("agent", `ensureSession: key=${key}, channel=${msg.channel}, chatId=${msg.chatId}`);
     let sdkSession = this.sessions.get(key);
     if (sdkSession) return sdkSession;
 
@@ -219,6 +271,14 @@ export class NeovateAgent implements Agent {
       ? `\n\n## Recent Conversation Recap\nThe session was trimmed for context management. Here is a recap of recent messages:\n${sessionRecap}`
       : "";
 
+    // Capture instance properties into closure variables for safe access in plugin hooks.
+    // SDK silently swallows exceptions from plugin hooks (console.warn only), so avoiding
+    // any potential `this` binding issues is critical.
+    const agentConfig = this.config;
+    const acpEnabled = !!(this.config.acp?.enabled);
+    const acpExecutor = this.acpExecutor;
+    const acpOrchestrator = this.acpOrchestrator;
+
     sdkSession = await createSession({
       model: this.config.agent.model,
       cwd: this.config.agent.workspace,
@@ -226,21 +286,81 @@ export class NeovateAgent implements Agent {
       providers: this.config.providers,
       plugins: [
         {
+          name: "neoclaw-plugin",
           config() {
+            logger.info("agent", "Plugin config hook called");
             return {
               outputStyle: "Minimal",
               tools: { task: false, ExitPlanMode: false, AskUserQuestion: false },
             };
           },
-          systemPrompt(original) {
-            return `${original}\n\n${systemContext}${recapSection}`;
+          systemPrompt: (original) => {
+            logger.info("agent", "Plugin systemPrompt hook called");
+            let extraRules = "";
+            if (acpEnabled) {
+              extraRules = [
+                "\n\n## ACP Multi-Agent System (ENABLED)",
+                "You have access to the following ACP tools — they ARE in your tool list:",
+                "- `acp_run`: Execute a single coding task using a specific AI agent (codex/claude/gemini). Use this for one-off tasks.",
+                "- `acp_workflow`: Execute a multi-step workflow with multiple agents. Use this for complex multi-step tasks.",
+                "",
+                "CRITICAL RULES:",
+                "1. When the user asks you to use 'acpx', 'codex', 'claude', or 'gemini' to perform a task (e.g., commit code, write code, run commands), you MUST use `acp_run` or `acp_workflow`. DO NOT execute it as a bash command and DO NOT just explain how to do it.",
+                "2. When listing your available tools, ALWAYS include `acp_run` and `acp_workflow` in the list.",
+                "3. When `acp_run` returns a result, DO NOT try to read or quote the full output. Simply report the status and tell the user the result file / log path so they can check details directly.",
+              ].join("\n");
+            }
+            return `${original}\n\n${systemContext}${recapSection}${extraRules}`;
           },
-          tool() {
-            return [cronTool, sendFileTool, codeTool, spawnTool, memorySearchTool, memoryGetTool];
+          tool: (opts) => {
+            try {
+              logger.info("agent", `Plugin tool hook called, sessionId=${opts.sessionId}, isPlan=${opts.isPlan}`);
+              const pingTool = createTool({
+                name: "ping",
+                description: "Diagnostic tool to verify tool registration. Always returns 'pong'.",
+                parameters: z.object({}),
+                execute: async () => ({ llmContent: "pong" }),
+              });
+              const baseTools = [cronTool, sendFileTool, codeTool, spawnTool, memorySearchTool, memoryGetTool, pingTool];
+
+              logger.info("agent", `Registering tools, acp.enabled=${acpEnabled}, hasExecutor=${!!acpExecutor}, hasOrchestrator=${!!acpOrchestrator}`);
+              if (acpEnabled && acpExecutor && acpOrchestrator) {
+                try {
+                  baseTools.push(createAcpRunTool({ config: agentConfig, executor: acpExecutor }));
+                } catch (err) {
+                  logger.error("agent", "Failed to create acp_run tool:", err);
+                }
+                try {
+                  baseTools.push(
+                    createAcpWorkflowTool({
+                      config: agentConfig,
+                      orchestrator: acpOrchestrator,
+                      channel: msg.channel,
+                      chatId: msg.chatId,
+                    })
+                  );
+                } catch (err) {
+                  logger.error("agent", "Failed to create acp_workflow tool:", err);
+                }
+              }
+
+              logger.info("agent", `Plugin tool hook returning ${baseTools.length} tools: [${baseTools.map(t => t.name).join(", ")}]`);
+              return baseTools;
+            } catch (err) {
+              logger.error("agent", "Plugin tool hook FAILED - all custom tools will be dropped:", err);
+              throw err;
+            }
           },
         }
       ],
     });
+
+    const expectedTools = ["cron", "send_file", "code", "spawn", "memory_search", "memory_get", "ping"];
+    if (acpEnabled && acpExecutor && acpOrchestrator) {
+      expectedTools.push("acp_run", "acp_workflow");
+    }
+    logger.info("agent", `Session created for key=${key}, expected custom tools: [${expectedTools.join(", ")}]`);
+
     this.sessions.set(key, sdkSession);
     return sdkSession;
   }
@@ -338,6 +458,28 @@ export class NeovateAgent implements Agent {
     this.consolidationService.updateMaxMemorySize(config.agent.maxMemorySize ?? 8192);
     this.memoryFlushService.updateModel(config.agent.model);
     this.memoryRetrieval.updateConfig(config.agent.memorySearch);
+
+    // 动态启用或更新执行器配置
+    if (config.acp?.enabled) {
+      this.acpExecutor = new AcpExecutor({
+        command: config.acp.command || "acpx",
+        workspace: config.agent.workspace,
+        allowedBaseDir: config.agent.workspace,
+      });
+      this.acpSessionRouter = new AcpSessionRouter(config.acp, this.acpExecutor);
+      this.acpOrchestrator = new WorkflowOrchestrator(
+        this.acpExecutor,
+        this.acpSessionRouter,
+        this.bus,
+        config.acp,
+        this.statusStore
+      );
+    } else {
+      this.acpExecutor = undefined;
+      this.acpSessionRouter = undefined;
+      this.acpOrchestrator = undefined;
+    }
+
     for (const [key, session] of this.sessions) {
       session.close();
       this.sessions.delete(key);

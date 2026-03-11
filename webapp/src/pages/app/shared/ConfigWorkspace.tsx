@@ -102,6 +102,12 @@ export default function ConfigWorkspace({ mode, onConfigSaved }: ConfigWorkspace
       dingtalk: { enabled: false, clientId: '', clientSecret: '', robotCode: '', corpId: '', allowFrom: '', keepAlive: false },
       feishu: { enabled: false, appId: '', appSecret: '', allowFrom: '', domain: 'feishu', connectionMode: 'websocket', verificationToken: '' },
     },
+    acp: {
+      enabled: false,
+      command: 'acpx',
+      defaultAgent: 'codex',
+      allowedAgents: ['codex', 'claude', 'gemini']
+    },
     providers: {},
     logLevel: 'info',
   });
@@ -985,6 +991,24 @@ export default function ConfigWorkspace({ mode, onConfigSaved }: ConfigWorkspace
               </div>
             )}
 
+            <label className="checkbox-label" style={{ marginBottom: '1rem' }}>
+              <input type="checkbox" checked={configDraft.acp.enabled} onChange={(e) => setConfigDraft({ ...configDraft, acp: { ...configDraft.acp, enabled: e.target.checked } })} />
+              {t('enableAcp')}
+            </label>
+
+            {configDraft.acp.enabled && (
+              <div className="advanced-panel fade-in">
+                <div className="form-group">
+                  <label className="form-label">{t('acpDefaultAgent')}</label>
+                  <select className="form-select" value={configDraft.acp.defaultAgent} onChange={(e) => setConfigDraft({ ...configDraft, acp: { ...configDraft.acp, defaultAgent: e.target.value } })}>
+                    <option value="codex">Codex</option>
+                    <option value="claude">Claude</option>
+                    <option value="gemini">Gemini</option>
+                  </select>
+                </div>
+              </div>
+            )}
+
             <div className="actions">
               <button className="btn btn-outline" onClick={() => setStep(2)}>{t('back')}</button>
               <button className="btn btn-primary" onClick={saveConfig} disabled={loading}>{loading ? t('saving') : t('finishAndSave')}</button>
@@ -997,7 +1021,7 @@ export default function ConfigWorkspace({ mode, onConfigSaved }: ConfigWorkspace
             <div style={{ textAlign: 'center' }}>
               <div style={{ fontSize: '4rem', marginBottom: '1rem' }}>🎉</div>
               <h2 style={{ marginBottom: '1rem', fontSize: '1.5rem' }}>{t('saveSuccessTitle')}</h2>
-              <p className="subtitle">{t('saveSuccessSubtitle')}</p>
+              <p className="subtitle">{t(agentRunning ? 'saveSuccessSubtitleRunning' : 'saveSuccessSubtitle')}</p>
             </div>
 
             <div style={{ background: '#f8fafc', padding: '1.5rem', borderRadius: 12, border: '1px solid #e2e8f0', marginBottom: '2rem', marginTop: '2rem' }}>

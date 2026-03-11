@@ -29,7 +29,7 @@ async function getHeadlessBus(cwd: string) {
   }
   return _headlessSession.messageBus;
 }
-import { configPath, ensureWorkspaceDirs, loadConfig, type Config } from "../config/schema.js";
+import { configPath, ensureWorkspaceDirs, loadConfig, defaultConfig, type Config } from "../config/schema.js";
 import { SkillManager } from "../agent/skill-manager.js";
 import { SessionManager, type Session } from "../session/manager.js";
 import { logger } from "../logger.js";
@@ -85,6 +85,18 @@ export type AutoStartResult = {
   mode?: "bun" | "neoclaw";
   pid?: number;
   error?: string;
+};
+
+export type AutoRestartResult = {
+  enabled: boolean;
+  restarted: boolean;
+  started?: boolean;
+  alreadyStarted?: boolean;
+  command?: string;
+  mode?: "bun" | "neoclaw";
+  pid?: number;
+  error?: string;
+  forcedKill?: boolean;
 };
 
 export type ConfigSaveResult = {
@@ -389,6 +401,88 @@ function readActiveAgentPid(baseDir: string): number | undefined {
   const pid = snapshot.agent.pid;
   if (!snapshot.agent.running || !isPidRunning(pid)) return undefined;
   return pid ?? undefined;
+}
+
+function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      if (!isPidRunning(pid)) {
+        clearInterval(timer);
+        resolve(true);
+        return;
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        clearInterval(timer);
+        resolve(false);
+      }
+    }, 200);
+  });
+}
+
+async function stopAgentByPid(pid: number, timeoutMs = 5000): Promise<{ stopped: boolean; error?: string; forcedKill?: boolean }> {
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (error) {
+    return { stopped: false, error: error instanceof Error ? error.message : String(error) };
+  }
+
+  const graceful = await waitForPidExit(pid, timeoutMs);
+  if (graceful) return { stopped: true };
+
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    return { stopped: false, error: error instanceof Error ? error.message : String(error) };
+  }
+
+  const forced = await waitForPidExit(pid, 2000);
+  if (forced) return { stopped: true, forcedKill: true };
+
+  return { stopped: false, error: "Timed out waiting for agent to stop" };
+}
+
+async function restartActiveAgent(baseDir: string, options: WebAutoStartOptions | undefined): Promise<AutoRestartResult> {
+  if (!options?.enabled) {
+    return {
+      enabled: false,
+      restarted: false,
+      error: "Auto-start is disabled",
+    };
+  }
+
+  const pid = readActiveAgentPid(baseDir);
+  if (!pid) {
+    return {
+      enabled: true,
+      restarted: false,
+      error: "Agent is not running",
+    };
+  }
+
+  const stopResult = await stopAgentByPid(pid);
+  if (!stopResult.stopped) {
+    return {
+      enabled: true,
+      restarted: false,
+      pid,
+      error: stopResult.error ?? "Failed to stop agent",
+      forcedKill: stopResult.forcedKill,
+    };
+  }
+
+  const startResult = await triggerAutoStart(baseDir, options);
+  return {
+    enabled: startResult.enabled,
+    restarted: true,
+    started: startResult.started,
+    alreadyStarted: startResult.alreadyStarted,
+    command: startResult.command,
+    mode: startResult.mode,
+    pid: startResult.pid,
+    error: startResult.error,
+    forcedKill: stopResult.forcedKill,
+  };
 }
 
 export function resolveAutoStartCommand(options: {
@@ -1143,12 +1237,16 @@ function parseStringArray(value: unknown): string[] {
 function normalizeIncomingConfig(body: JsonBody, baseDir: string): Config {
   const current = loadConfig(baseDir);
   const next = structuredClone(current);
+  if (!next.acp || typeof next.acp !== "object") {
+    next.acp = defaultConfig(baseDir).acp;
+  }
 
   const agent = (body.agent ?? {}) as JsonBody;
   const memorySearch = (agent.memorySearch ?? {}) as JsonBody;
   const memoryEmbeddings = (memorySearch.embeddings ?? {}) as JsonBody;
   const memoryFlush = (agent.memoryFlush ?? {}) as JsonBody;
   const channels = (body.channels ?? {}) as JsonBody;
+  const acp = (body.acp ?? {}) as JsonBody;
   const telegram = (channels.telegram ?? {}) as JsonBody;
   const cli = (channels.cli ?? {}) as JsonBody;
   const dingtalk = (channels.dingtalk ?? {}) as JsonBody;
@@ -1174,6 +1272,32 @@ function normalizeIncomingConfig(body: JsonBody, baseDir: string): Config {
   if (typeof memoryEmbeddings.dims === "number") next.agent.memorySearch = { ...next.agent.memorySearch, embeddings: { ...next.agent.memorySearch?.embeddings, dims: Math.max(1, Math.floor(memoryEmbeddings.dims)) } };
   if (typeof memoryFlush.enabled === "boolean") next.agent.memoryFlush = { ...next.agent.memoryFlush, enabled: memoryFlush.enabled };
   if (typeof memoryFlush.timeoutMs === "number") next.agent.memoryFlush = { ...next.agent.memoryFlush, timeoutMs: Math.max(1000, Math.floor(memoryFlush.timeoutMs)) };
+
+  if (typeof acp.enabled === "boolean") next.acp = { ...next.acp, enabled: acp.enabled };
+  if (typeof acp.command === "string") next.acp = { ...next.acp, command: acp.command.trim() };
+  if (typeof acp.defaultAgent === "string" && ["codex", "claude", "gemini"].includes(acp.defaultAgent)) {
+    next.acp = { ...next.acp, defaultAgent: acp.defaultAgent as "codex" | "claude" | "gemini" };
+  }
+  if (acp.allowedAgents !== undefined) next.acp = { ...next.acp, allowedAgents: parseStringArray(acp.allowedAgents) };
+  if (typeof acp.defaultPermission === "string" && ["approve-reads", "approve-all", "deny-all"].includes(acp.defaultPermission)) {
+    next.acp = { ...next.acp, defaultPermission: acp.defaultPermission as "approve-reads" | "approve-all" | "deny-all" };
+  }
+  if (typeof acp.timeoutSec === "number") next.acp = { ...next.acp, timeoutSec: Math.max(1, Math.floor(acp.timeoutSec)) };
+  if (typeof acp.maxParallelRuns === "number") next.acp = { ...next.acp, maxParallelRuns: Math.max(1, Math.floor(acp.maxParallelRuns)) };
+  if (typeof acp.maxStepRetries === "number") next.acp = { ...next.acp, maxStepRetries: Math.max(0, Math.floor(acp.maxStepRetries)) };
+  if (typeof acp.retryBackoffMs === "number") next.acp = { ...next.acp, retryBackoffMs: Math.max(0, Math.floor(acp.retryBackoffMs)) };
+  if (typeof acp.autoEnsureSession === "boolean") next.acp = { ...next.acp, autoEnsureSession: acp.autoEnsureSession };
+  if (typeof acp.fallbackToCodeTool === "boolean") next.acp = { ...next.acp, fallbackToCodeTool: acp.fallbackToCodeTool };
+  if (typeof acp.artifactDir === "string") next.acp = { ...next.acp, artifactDir: acp.artifactDir.trim() };
+  if (typeof acp.logDir === "string") next.acp = { ...next.acp, logDir: acp.logDir.trim() };
+  if (typeof acp.stateDir === "string") next.acp = { ...next.acp, stateDir: acp.stateDir.trim() };
+  if (acp.agentCommandOverrides && typeof acp.agentCommandOverrides === "object" && !Array.isArray(acp.agentCommandOverrides)) {
+    const overrides: Record<string, string> = {};
+    for (const [key, value] of Object.entries(acp.agentCommandOverrides as Record<string, unknown>)) {
+      if (typeof value === "string" && key.trim()) overrides[key.trim()] = value.trim();
+    }
+    next.acp = { ...next.acp, agentCommandOverrides: overrides };
+  }
 
   if (typeof telegram.enabled === "boolean") next.channels.telegram.enabled = telegram.enabled;
   if (typeof telegram.token === "string" && telegram.token.trim() && telegram.token.trim() !== "********") {
@@ -1724,6 +1848,12 @@ export async function handleWebCommand(opts: WebOptions): Promise<WebCommandResu
         if (url.pathname === "/api/agent/start" && method === "POST") {
           const started = await triggerAutoStart(opts.baseDir, opts.autoStart);
           sendJson(res, started.error ? 500 : 200, started);
+          return;
+        }
+
+        if (url.pathname === "/api/agent/restart" && method === "POST") {
+          const restarted = await restartActiveAgent(opts.baseDir, opts.autoStart);
+          sendJson(res, restarted.error ? 500 : 200, restarted);
           return;
         }
 

@@ -23,6 +23,7 @@
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@neovate/code": "^0.28.5",
+    "acpx": "^0.1.16",
     "axios": "^1.13.5",
     "cron-parser": "^4.9.0",
     "dingtalk-stream": "^2.1.4",
